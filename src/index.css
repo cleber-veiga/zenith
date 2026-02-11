@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-family: 'Inter', system-ui, sans-serif;
+  --page-bg: #020617;
+  --page-surface: #0b1220;
+  --panel-bg: #0f172a;
+  --panel-bg-soft: rgba(15, 23, 42, 0.6);
+  --panel-border: rgba(148, 163, 184, 0.2);
+  --panel-border-strong: rgba(148, 163, 184, 0.35);
+  --card-bg: rgba(255, 255, 255, 0.05);
+  --card-border: rgba(255, 255, 255, 0.08);
+  --muted-bg: rgba(2, 6, 23, 0.4);
+  --input-bg: rgba(2, 6, 23, 0.6);
+  --input-border: rgba(148, 163, 184, 0.2);
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #22d3ee;
+  --accent-strong: #06b6d4;
+  --accent-soft: rgba(34, 211, 238, 0.15);
+  --success: #34d399;
+  --danger: #fb7185;
+  --ring: rgba(56, 189, 248, 0.35);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --page-bg: #f5f7fa;
+  --page-surface: #ffffff;
+  --panel-bg: #ffffff;
+  --panel-bg-soft: #fafafa;
+  --panel-border: #e2e4e7;
+  --panel-border-strong: #d1d5db;
+  --card-bg: #ffffff;
+  --card-border: #e2e4e7;
+  --muted-bg: #f3f4f6;
+  --input-bg: #ffffff;
+  --input-border: #cbd5e1;
+  --text-primary: #292d34;
+  --text-secondary: #6b7280;
+  --text-muted: #9ca3af;
+  --accent: #7b68ee;
+  --accent-strong: #6366f1;
+  --accent-soft: rgba(123, 104, 238, 0.12);
+  --success: #10b981;
+  --danger: #ef4444;
+  --ring: rgba(123, 104, 238, 0.3);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--page-bg);
+  color: var(--text-primary);
+}
