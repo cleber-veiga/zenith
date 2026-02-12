@@ -475,16 +475,33 @@ export function ProjectSection({
   );
 
   const formatAuditValue = (field: string, value: string | null) => {
-    if (!value) return '-';
+    if (!value || value === 'null') return '-';
     
-    if (field === 'Tempo de Execução efetivado' || field === 'Tempo de Execução estimado') {
+    if (field === 'executionPeriods' || field === 'Períodos de Execução') {
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) {
+          if (!parsed.length) return 'Nenhum';
+          return parsed.map((p: any) => {
+            const d = p.date ? p.date.split('-').reverse().join('/') : '?';
+            const t = (p.startTime && p.endTime) ? `${p.startTime}-${p.endTime}` : (p.startTime || '?');
+            return `[${d} ${t}]`;
+          }).join(', ');
+        }
+      } catch {}
+    }
+    
+    if (field === 'Tempo de Execução efetivado' || field === 'Tempo de Execução estimado' || field === 'estimatedMinutes' || field === 'actualMinutes') {
       const minutes = parseInt(value, 10);
       if (!isNaN(minutes)) {
         return `${minutes}m`;
       }
     }
 
-    if (field === 'Executor' || field === 'Validador' || field === 'Informar') {
+    if (
+      field === 'Executor' || field === 'Validador' || field === 'Informar' ||
+      field === 'executorIds' || field === 'validatorIds' || field === 'informIds'
+    ) {
       try {
         const parsed = JSON.parse(value);
         if (Array.isArray(parsed)) {

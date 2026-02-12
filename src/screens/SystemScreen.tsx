@@ -485,6 +485,11 @@ export function SystemScreen({
 
     setDashboardTasks(mappedTasks);
 
+    const localMemberMap = new Map<string, string>();
+    workspaceMembers.forEach((m) => {
+      localMemberMap.set(m.userId, m.fullName || m.email || m.userId);
+    });
+
     const dashboardMemberIds = Array.from(
       new Set(
         mappedTasks.flatMap((task) => [
@@ -502,6 +507,16 @@ export function SystemScreen({
       if (profilesError) {
         console.error('Erro ao carregar perfis no dashboard:', profilesError);
       } else {
+        (profiles ?? []).forEach((profile: {
+            user_id: string;
+            full_name?: string | null;
+            title?: string | null;
+            avatar_url?: string | null;
+            email?: string | null;
+          }) => {
+            localMemberMap.set(profile.user_id, profile.full_name || profile.email || profile.user_id);
+          });
+
         setDashboardMembers(
           (profiles ?? []).map((profile: {
             user_id: string;
@@ -571,18 +586,53 @@ export function SystemScreen({
         createdAt: row.created_at,
         userId: row.changed_by,
         type: 'due' as const,
-        summary: `Prazo ${row.previous_date ?? '-'} -> ${row.new_date ?? '-'}`
+        summary: `Prazo ${row.previous_date ? row.previous_date.split('-').reverse().join('/') : '-'} → ${row.new_date ? row.new_date.split('-').reverse().join('/') : '-'}`
       })) ?? [];
 
+    const formatAuditValue = (field: string, value: string | null) => {
+      if (!value || value === 'null') return '-';
+      
+      if (field === 'executionPeriods') {
+        try {
+          const parsed = JSON.parse(value);
+          if (Array.isArray(parsed)) {
+            if (!parsed.length) return 'Nenhum';
+            return parsed.map((p: any) => {
+              const d = p.date ? p.date.split('-').reverse().join('/') : '?';
+              const t = (p.startTime && p.endTime) ? `${p.startTime}-${p.endTime}` : (p.startTime || '?');
+              return `[${d} ${t}]`;
+            }).join(', ');
+          }
+        } catch {}
+      }
+
+      if (['Executor', 'Validador', 'Informar', 'executorIds', 'validatorIds', 'informIds'].includes(field)) {
+        try {
+          const parsed = JSON.parse(value);
+          if (Array.isArray(parsed)) {
+            if (!parsed.length) return 'Nenhum';
+            return parsed.map((id: string) => localMemberMap.get(id) ?? id).join(', ');
+          }
+        } catch {}
+      }
+
+      return value;
+    };
+
     const auditEvents =
-      auditResult.data?.map((row) => ({
-        id: row.id,
-        taskId: row.task_id,
-        createdAt: row.created_at,
-        userId: row.changed_by,
-        type: 'audit' as const,
-        summary: `${row.field}: ${row.old_value ?? '-'} -> ${row.new_value ?? '-'}`
-      })) ?? [];
+      auditResult.data?.map((row) => {
+        const fieldLabel = row.field === 'executionPeriods' ? 'Períodos de Execução' : row.field;
+        const oldVal = formatAuditValue(row.field, row.old_value);
+        const newVal = formatAuditValue(row.field, row.new_value);
+        return {
+          id: row.id,
+          taskId: row.task_id,
+          createdAt: row.created_at,
+          userId: row.changed_by,
+          type: 'audit' as const,
+          summary: `${fieldLabel}: ${oldVal} → ${newVal}`
+        };
+      }) ?? [];
 
     const merged = [...timeEvents, ...dueEvents, ...auditEvents].sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt)
