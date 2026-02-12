@@ -128,6 +128,8 @@ export function SystemScreen({
   });
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordMessage, setPasswordMessage] = useState<string | null>(null);
   const [avatarUploading, setAvatarUploading] = useState(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [projectTaskState, setProjectTaskState] = useState<Record<string, ProjectTask[]>>({});
@@ -1697,6 +1699,36 @@ export function SystemScreen({
     setProfileSaving(false);
   };
 
+  const handlePasswordChange = async (newPassword: string) => {
+    setPasswordSaving(true);
+    setPasswordMessage(null);
+
+    if (!newPassword.trim() || newPassword.trim().length < 6) {
+      const message = 'A senha deve ter ao menos 6 caracteres.';
+      setPasswordMessage(message);
+      setPasswordSaving(false);
+      throw new Error(message);
+    }
+
+    const { error: updateError } = await supabase.auth.updateUser({
+      password: newPassword.trim()
+    });
+
+    if (updateError) {
+      const message = updateError.message || 'Não foi possível atualizar a senha.';
+      setPasswordMessage(message);
+      setPasswordSaving(false);
+      throw updateError;
+    }
+
+    await supabase
+      .from('user_profiles')
+      .upsert({ user_id: userId, password_set: true }, { onConflict: 'user_id' });
+
+    setPasswordMessage('Senha atualizada com sucesso.');
+    setPasswordSaving(false);
+  };
+
   const handleAvatarUpload = async (file: File) => {
     if (!file) return;
     setAvatarError(null);
@@ -1977,7 +2009,9 @@ export function SystemScreen({
                 <ProfileSection
                   profileForm={profileForm}
                   profileMessage={profileMessage}
+                  passwordMessage={passwordMessage}
                   profileSaving={profileSaving}
+                  passwordSaving={passwordSaving}
                   avatarUploading={avatarUploading}
                   avatarError={avatarError}
                   profile={profile}
@@ -1994,6 +2028,7 @@ export function SystemScreen({
                   }
                   onUploadAvatar={handleAvatarUpload}
                   onSave={handleProfileSave}
+                  onChangePassword={handlePasswordChange}
                   onSignOut={onSignOut}
                 />
               )}

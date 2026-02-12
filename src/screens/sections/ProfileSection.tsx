@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { UserProfile } from '../../types';
 
 type ProfileSectionProps = {
@@ -9,7 +10,9 @@ type ProfileSectionProps = {
     avatarUrl: string;
   };
   profileMessage: string | null;
+  passwordMessage: string | null;
   profileSaving: boolean;
+  passwordSaving: boolean;
   avatarUploading: boolean;
   avatarError: string | null;
   profile: UserProfile | null;
@@ -21,13 +24,16 @@ type ProfileSectionProps = {
   onChangeField: (field: keyof ProfileSectionProps['profileForm'], value: string) => void;
   onUploadAvatar: (file: File) => void;
   onSave: (event: React.FormEvent<HTMLFormElement>) => void;
+  onChangePassword: (newPassword: string) => Promise<void> | void;
   onSignOut: () => void;
 };
 
 export function ProfileSection({
   profileForm,
   profileMessage,
+  passwordMessage,
   profileSaving,
+  passwordSaving,
   avatarUploading,
   avatarError,
   profile,
@@ -39,8 +45,39 @@ export function ProfileSection({
   onChangeField,
   onUploadAvatar,
   onSave,
+  onChangePassword,
   onSignOut
 }: ProfileSectionProps) {
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+
+  const handlePasswordSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setPasswordError(null);
+
+    if (!newPassword.trim() || !confirmPassword.trim()) {
+      setPasswordError('Preencha nova senha e confirmação.');
+      return;
+    }
+    if (newPassword.trim().length < 6) {
+      setPasswordError('A nova senha deve ter ao menos 6 caracteres.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('A confirmação da senha não confere.');
+      return;
+    }
+
+    try {
+      await Promise.resolve(onChangePassword(newPassword.trim()));
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch {
+      // Mensagem já tratada no componente pai.
+    }
+  };
+
   const avatarPreview = profileForm.avatarUrl || profile?.avatarUrl || '';
   return (
     <div className="h-full overflow-y-auto p-8">
@@ -262,6 +299,70 @@ export function ProfileSection({
           className="w-full rounded-xl bg-[var(--accent)] px-4 py-3 text-base font-semibold text-slate-950 transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-70"
         >
           {profileSaving ? 'Salvando...' : 'Salvar perfil'}
+        </button>
+      </form>
+
+      <form onSubmit={handlePasswordSubmit} className="mt-6 flex flex-col gap-4 p-6">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-secondary)]">
+            Segurança
+          </p>
+          <h2 className="mt-2 text-xl font-semibold text-[var(--text-primary)]">
+            Alterar senha
+          </h2>
+          <p className="mt-1 text-sm text-[var(--text-secondary)]">
+            Defina uma nova senha para sua conta.
+          </p>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="text-sm text-[var(--text-secondary)]">
+            Nova senha
+            <input
+              type="password"
+              value={newPassword}
+              onChange={(event) => setNewPassword(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-3 text-base text-[var(--text-primary)] outline-none transition focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--ring)]"
+              placeholder="Mínimo de 6 caracteres"
+              autoComplete="new-password"
+            />
+          </label>
+          <label className="text-sm text-[var(--text-secondary)]">
+            Confirmar nova senha
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={(event) => setConfirmPassword(event.target.value)}
+              className="mt-2 w-full rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-4 py-3 text-base text-[var(--text-primary)] outline-none transition focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--ring)]"
+              placeholder="Repita a nova senha"
+              autoComplete="new-password"
+            />
+          </label>
+        </div>
+
+        {passwordError ? (
+          <div className="rounded-xl border border-rose-400/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+            {passwordError}
+          </div>
+        ) : null}
+        {passwordMessage ? (
+          <div
+            className={`rounded-xl px-4 py-3 text-sm ${
+              passwordMessage.toLowerCase().includes('sucesso')
+                ? 'border border-emerald-400/40 bg-emerald-500/10 text-emerald-200'
+                : 'border border-rose-400/40 bg-rose-500/10 text-rose-200'
+            }`}
+          >
+            {passwordMessage}
+          </div>
+        ) : null}
+
+        <button
+          type="submit"
+          disabled={passwordSaving}
+          className="w-full rounded-xl bg-[var(--accent)] px-4 py-3 text-base font-semibold text-slate-950 transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-70"
+        >
+          {passwordSaving ? 'Atualizando senha...' : 'Atualizar senha'}
         </button>
       </form>
     </div>
