@@ -330,6 +330,7 @@ export function DashboardSection({
   const [taskViewMode, setTaskViewMode] = useState<TaskViewMode>('list');
   const [calendarView, setCalendarView] = useState<CalendarViewMode>('month');
   const [calendarDate, setCalendarDate] = useState<Date>(() => new Date());
+  const [typeSectorFilter, setTypeSectorFilter] = useState<'all' | 'not_done'>('all');
 
   useEffect(() => {
     setSummaryGeneratedAt(null);
@@ -391,6 +392,39 @@ export function DashboardSection({
       .sort((a, b) => b.count - a.count)
       .slice(0, 8);
   }, [tasks, workspaceMembers]);
+
+  const typeSectorFilteredTasks = useMemo(() => {
+    if (typeSectorFilter === 'not_done') {
+      return tasks.filter((task) => task.status !== 'Concluída');
+    }
+    return tasks;
+  }, [tasks, typeSectorFilter]);
+
+  const sectorCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    typeSectorFilteredTasks.forEach((task) => {
+      const key = task.sector?.trim() || 'Sem setor';
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+    return Array.from(counts.entries())
+      .map(([label, count]) => ({ label, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8);
+  }, [typeSectorFilteredTasks]);
+
+  const taskTypeCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    typeSectorFilteredTasks.forEach((task) => {
+      const key = task.taskType?.trim() || 'Sem tipo';
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+    return Array.from(counts.entries())
+      .map(([label, count]) => ({ label, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8);
+  }, [typeSectorFilteredTasks]);
+
+  const typeSectorTotal = typeSectorFilteredTasks.length;
 
   const memberMap = useMemo(() => {
     return new Map(
@@ -1071,6 +1105,108 @@ export function DashboardSection({
                   {!userCounts.length && (
                     <div className="text-xs text-[var(--text-muted)]">
                       Sem distribuicao por executor.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                    Tarefas por setor
+                  </h3>
+                  <div className="flex items-center gap-1 rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] p-1">
+                    <button
+                      type="button"
+                      onClick={() => setTypeSectorFilter('all')}
+                      className={`rounded-md px-2 py-1 text-[10px] font-semibold transition ${
+                        typeSectorFilter === 'all'
+                          ? 'bg-[var(--accent)] text-white'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      Todas
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTypeSectorFilter('not_done')}
+                      className={`rounded-md px-2 py-1 text-[10px] font-semibold transition ${
+                        typeSectorFilter === 'not_done'
+                          ? 'bg-[var(--accent)] text-white'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      Não concluídas
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-4 space-y-3">
+                  {sectorCounts.map((item) => {
+                    const color = sectorColorMap.get(item.label) ?? '#38bdf8';
+                    const percent = typeSectorTotal ? Math.round((item.count / typeSectorTotal) * 100) : 0;
+                    return (
+                      <div key={item.label}>
+                        <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className="h-2.5 w-2.5 rounded-full"
+                              style={{ backgroundColor: color }}
+                            />
+                            <span>{item.label}</span>
+                          </div>
+                          <span className="font-semibold text-[var(--text-primary)]">{item.count}</span>
+                        </div>
+                        <div className="mt-1 h-1.5 rounded-full bg-[var(--panel-border)]">
+                          <div
+                            className="h-1.5 rounded-full"
+                            style={{ width: `${Math.min(100, percent)}%`, backgroundColor: color }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {!sectorCounts.length && (
+                    <div className="text-xs text-[var(--text-muted)]">
+                      Sem distribuicao por setor.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Tarefas por tipo
+                </h3>
+                <div className="mt-4 space-y-3">
+                  {taskTypeCounts.map((item) => {
+                    const color = taskTypeColorMap.get(item.label) ?? '#f97316';
+                    const percent = typeSectorTotal ? Math.round((item.count / typeSectorTotal) * 100) : 0;
+                    return (
+                      <div key={item.label}>
+                        <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className="h-2.5 w-2.5 rounded-full"
+                              style={{ backgroundColor: color }}
+                            />
+                            <span>{item.label}</span>
+                          </div>
+                          <span className="font-semibold text-[var(--text-primary)]">{item.count}</span>
+                        </div>
+                        <div className="mt-1 h-1.5 rounded-full bg-[var(--panel-border)]">
+                          <div
+                            className="h-1.5 rounded-full"
+                            style={{ width: `${Math.min(100, percent)}%`, backgroundColor: color }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {!taskTypeCounts.length && (
+                    <div className="text-xs text-[var(--text-muted)]">
+                      Sem distribuicao por tipo.
                     </div>
                   )}
                 </div>
