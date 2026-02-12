@@ -40,24 +40,6 @@ export function LoginScreen() {
               <h1 className="mt-5 font-display text-4xl font-semibold leading-tight text-[var(--text-primary)] md:text-5xl">
                 Bem-vindo de volta ao Zenith
               </h1>
-              <p className="mt-4 max-w-xl text-base text-[var(--text-secondary)] md:text-lg">
-                Acesso exclusivo para usuários convidados. Entre com seu e-mail e senha corporativos
-                para continuar.
-              </p>
-              <div className="mt-8 flex items-center gap-6">
-                <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] px-5 py-4">
-                  <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-                    Status
-                  </p>
-                  <p className="mt-2 text-sm text-[var(--text-primary)]">Convite obrigatório</p>
-                </div>
-                <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] px-5 py-4">
-                  <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-                    Segurança
-                  </p>
-                  <p className="mt-2 text-sm text-[var(--text-primary)]">Login com Supabase</p>
-                </div>
-              </div>
             </section>
 
             <section className="rounded-3xl border border-[var(--panel-border)] bg-[var(--panel-bg-soft)] p-8 shadow-soft backdrop-blur">
