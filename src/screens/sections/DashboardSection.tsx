@@ -1,7 +1,48 @@
-import { useMemo } from 'react';
-import type { ProjectTask, TaskStatus, Workspace } from '../../types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import ExcelJS from 'exceljs';
+import html2canvas from 'html2canvas';
+import { jsPDF } from 'jspdf';
+import { FunctionsFetchError, FunctionsHttpError, FunctionsRelayError } from '@supabase/supabase-js';
+import type {
+  ProjectTask,
+  TaskAuditLog,
+  TaskComment,
+  TaskDueDateChange,
+  TaskPriority,
+  TaskStatus,
+  TaskTimeEntry,
+  Workspace,
+  WorkspaceTagOption
+} from '../../types';
+import { supabase } from '../../lib/supabase';
 import { IconBriefcase, IconLayers } from '../../components/icons';
 import { CustomSelect } from '../../components/CustomSelect';
+import {
+  Calendar,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  LayoutList,
+  List,
+  Sparkles,
+  X
+} from 'lucide-react';
+import {
+  addDays,
+  addMonths,
+  addWeeks,
+  eachDayOfInterval,
+  endOfMonth,
+  endOfWeek,
+  format as formatDateFns,
+  isSameMonth,
+  isToday,
+  startOfMonth,
+  startOfWeek
+} from 'date-fns';
 
 const STATUS_COLORS: Record<TaskStatus, string> = {
   Backlog: '#94a3b8',
@@ -13,12 +54,208 @@ const STATUS_COLORS: Record<TaskStatus, string> = {
   Cancelada: '#64748b'
 };
 
+const PRIORITY_OPTIONS: TaskPriority[] = ['Baixa', 'Média', 'Alta', 'Crítica'];
+const weekDayNames = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'] as const;
+
+type DashboardTab = 'dashboard' | 'tasks';
+type TaskSituation = 'No Prazo' | 'Finalizada' | 'Atrasada';
+type TaskViewMode = 'list' | 'board' | 'calendar';
+type CalendarViewMode = 'month' | 'week' | 'day';
+
+type TaskGridFilters = {
+  description: string;
+  projects: string[];
+  sectors: string[];
+  taskTypes: string[];
+  priorities: TaskPriority[];
+  statuses: TaskStatus[];
+  dueDate: string;
+  executors: string[];
+  situations: TaskSituation[];
+};
+
+const DEFAULT_TASK_GRID_FILTERS: TaskGridFilters = {
+  description: '',
+  projects: [],
+  sectors: [],
+  taskTypes: [],
+  priorities: [],
+  statuses: [],
+  dueDate: '',
+  executors: [],
+  situations: []
+};
+
+const normalizeDateValue = (value: string) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (date.toString() === 'Invalid Date') {
+    return value.length >= 10 ? value.slice(0, 10) : value;
+  }
+  return date.toISOString().slice(0, 10);
+};
+
+const formatDatePtBr = (value: string) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (date.toString() === 'Invalid Date') return value;
+  return date.toLocaleDateString('pt-BR');
+};
+
+const getTaskSituation = (task: ProjectTask): TaskSituation => {
+  if (task.status === 'Concluída') return 'Finalizada';
+  const dueDateValue = normalizeDateValue(task.dueDateCurrent || task.dueDateOriginal || '');
+  const today = normalizeDateValue(new Date().toISOString());
+  if (dueDateValue && dueDateValue < today) return 'Atrasada';
+  return 'No Prazo';
+};
+
+type MultiFilterSelectProps = {
+  options: Array<{ value: string; label: string }>;
+  values: string[];
+  placeholder: string;
+  onChange: (next: string[]) => void;
+};
+
+function MultiFilterSelect({ options, values, placeholder, onChange }: MultiFilterSelectProps) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ top: 0, left: 0, width: 0 });
+
+  useEffect(() => {
+    const handleOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      const clickedInsideContainer = containerRef.current?.contains(target);
+      const clickedInsideDropdown = dropdownRef.current?.contains(target);
+      
+      if (!clickedInsideContainer && !clickedInsideDropdown) {
+        setOpen(false);
+      }
+    };
+    
+    const handleScroll = () => {
+      if (open) setOpen(false);
+    };
+
+    document.addEventListener('mousedown', handleOutside);
+    window.addEventListener('scroll', handleScroll, true);
+    
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
+  }, [open]);
+
+  const handleToggle = () => {
+    if (!open && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      setPosition({
+        top: rect.bottom + window.scrollY,
+        left: rect.left + window.scrollX,
+        width: rect.width
+      });
+    }
+    setOpen((prev) => !prev);
+  };
+
+  const selectedLabels = options
+    .filter((option) => values.includes(option.value))
+    .map((option) => option.label);
+
+  return (
+    <div ref={containerRef} className="relative">
+      <button
+        type="button"
+        onClick={handleToggle}
+        className="flex w-full items-center justify-between gap-2 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-2 py-1.5 text-xs text-[var(--text-primary)] hover:border-cyan-500/40 transition-colors"
+      >
+        <span className="truncate text-left">
+          {!selectedLabels.length
+            ? placeholder
+            : selectedLabels.length === 1
+              ? selectedLabels[0]
+              : `${selectedLabels.length} selecionados`}
+        </span>
+        <ChevronDown
+          size={13}
+          className={`text-[var(--text-muted)] transition-transform ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+
+      {open && createPortal(
+        <div 
+          ref={dropdownRef}
+          style={{
+            top: position.top + 4,
+            left: position.left,
+            width: Math.max(position.width, 180)
+          }}
+          className="absolute z-[9999] rounded-xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-1.5 shadow-2xl"
+        >
+          <div className="mb-1 flex items-center justify-end">
+            <button
+              type="button"
+              onClick={() => onChange([])}
+              className="text-[10px] font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+            >
+              Limpar
+            </button>
+          </div>
+          <div className="max-h-52 overflow-y-auto space-y-0.5">
+            {options.map((option) => {
+              const selected = values.includes(option.value);
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() =>
+                    onChange(
+                      selected
+                        ? values.filter((item) => item !== option.value)
+                        : [...values, option.value]
+                    )
+                  }
+                  className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors ${
+                    selected
+                      ? 'bg-cyan-500/15 text-cyan-200'
+                      : 'text-[var(--text-secondary)] hover:bg-[var(--muted-bg)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  <span
+                    className={`flex h-4 w-4 items-center justify-center rounded border ${
+                      selected
+                        ? 'border-cyan-400 bg-cyan-500/30 text-cyan-200'
+                        : 'border-[var(--panel-border)] text-transparent'
+                    }`}
+                  >
+                    <Check size={11} />
+                  </span>
+                  <span className="truncate text-left">{option.label}</span>
+                </button>
+              );
+            })}
+            {!options.length && (
+              <div className="px-2 py-2 text-center text-xs text-[var(--text-muted)]">
+                Sem opções
+              </div>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
 type DashboardSectionProps = {
   loadingWorkspaces: boolean;
   loadError: string | null;
   selectedWorkspace: Workspace | null;
   canManageWorkspaces: boolean;
   tasks: ProjectTask[];
+  sectors: WorkspaceTagOption[];
+  taskTypes: WorkspaceTagOption[];
   dashboardEvents: Array<{
     id: string;
     taskId: string;
@@ -28,6 +265,7 @@ type DashboardSectionProps = {
     summary: string;
   }>;
   dashboardLoading: boolean;
+  isManager: boolean;
   projectFilterId: string;
   onChangeProjectFilter: (projectId: string) => void;
   workspaceMembers: Array<{
@@ -37,6 +275,12 @@ type DashboardSectionProps = {
     avatarUrl?: string | null;
     email?: string | null;
   }>;
+  timeEntries: Record<string, TaskTimeEntry[]>;
+  dueDateChanges: Record<string, TaskDueDateChange[]>;
+  auditLogs: Record<string, TaskAuditLog[]>;
+  taskComments: Record<string, TaskComment[]>;
+  onLoadTaskExtras: (taskId: string) => Promise<void> | void;
+  onAddTaskComment: (taskId: string, content: string) => Promise<void> | void;
   onNewProject: () => void;
 };
 
@@ -46,13 +290,43 @@ export function DashboardSection({
   selectedWorkspace,
   canManageWorkspaces,
   tasks,
+  sectors,
+  taskTypes,
   dashboardEvents,
   dashboardLoading,
+  isManager,
   projectFilterId,
   onChangeProjectFilter,
   workspaceMembers,
+  timeEntries,
+  dueDateChanges,
+  auditLogs,
+  taskComments,
+  onLoadTaskExtras,
+  onAddTaskComment,
   onNewProject
 }: DashboardSectionProps) {
+  const dashboardCaptureRef = useRef<HTMLDivElement>(null);
+  const [activeTab, setActiveTab] = useState<DashboardTab>('dashboard');
+  const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
+  const [detailTaskTab, setDetailTaskTab] = useState<'info' | 'time' | 'deadline' | 'comments' | 'logs'>('info');
+  const [commentDraft, setCommentDraft] = useState('');
+  const [loadingTaskDetails, setLoadingTaskDetails] = useState(false);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryText, setSummaryText] = useState<string>('');
+  const [summaryMessage, setSummaryMessage] = useState<string | null>(null);
+  const [summaryGeneratedAt, setSummaryGeneratedAt] = useState<string | null>(null);
+  const [taskGridFilters, setTaskGridFilters] = useState<TaskGridFilters>(DEFAULT_TASK_GRID_FILTERS);
+  const [taskViewMode, setTaskViewMode] = useState<TaskViewMode>('list');
+  const [calendarView, setCalendarView] = useState<CalendarViewMode>('month');
+  const [calendarDate, setCalendarDate] = useState<Date>(() => new Date());
+
+  useEffect(() => {
+    setSummaryGeneratedAt(null);
+    setSummaryText('');
+    setSummaryMessage(null);
+  }, [selectedWorkspace?.id, projectFilterId]);
+
   const statusOptions: TaskStatus[] = [
     'Backlog',
     'Pendente',
@@ -101,7 +375,7 @@ export function DashboardSection({
         return {
           userId,
           count,
-          label: member?.fullName || member?.email || 'Usuário'
+          label: member?.fullName || member?.email || userId
         };
       })
       .sort((a, b) => b.count - a.count)
@@ -112,10 +386,359 @@ export function DashboardSection({
     return new Map(
       workspaceMembers.map((member) => [
         member.userId,
-        member.fullName || member.email || 'Usuário'
+        member.fullName || member.email || member.userId
       ])
     );
   }, [workspaceMembers]);
+
+  const formatMinutes = (minutes: number) => {
+    const total = Math.max(0, Math.round(minutes || 0));
+    const hours = Math.floor(total / 60);
+    const mins = total % 60;
+    if (hours && mins) return `${hours}h ${mins}m`;
+    if (hours) return `${hours}h`;
+    return `${mins}m`;
+  };
+
+  const formatAuditValue = (field: string, value: string | null) => {
+    if (!value) return '-';
+
+    if (field === 'Tempo de Execução efetivado' || field === 'Tempo de Execução estimado') {
+      const minutes = parseInt(value, 10);
+      if (!isNaN(minutes)) {
+        return `${minutes}m`;
+      }
+    }
+
+    if (field === 'Executor' || field === 'Validador' || field === 'Informar') {
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) {
+          if (!parsed.length) return '-';
+          return parsed
+            .map((id) => (typeof id === 'string' ? memberMap.get(id) ?? id : String(id)))
+            .join(', ');
+        }
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  };
+
+  const openTaskDetail = async (taskId: string) => {
+    setDetailTaskId(taskId);
+    setDetailTaskTab('info');
+    setCommentDraft('');
+    setLoadingTaskDetails(true);
+    try {
+      await Promise.resolve(onLoadTaskExtras(taskId));
+    } finally {
+      setLoadingTaskDetails(false);
+    }
+  };
+
+  const sectorColorMap = useMemo(
+    () => new Map(sectors.map((item) => [item.name, item.color])),
+    [sectors]
+  );
+  const taskTypeColorMap = useMemo(
+    () => new Map(taskTypes.map((item) => [item.name, item.color])),
+    [taskTypes]
+  );
+  const projectNameById = useMemo(
+    () => new Map((selectedWorkspace?.projects ?? []).map((project) => [project.id, project.name])),
+    [selectedWorkspace]
+  );
+  const projectFilterOptions = useMemo(() => {
+    const entries = new Map<string, string>();
+    tasks.forEach((task) => {
+      if (!task.projectId) return;
+      entries.set(task.projectId, projectNameById.get(task.projectId) ?? 'Projeto');
+    });
+    return Array.from(entries.entries())
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [tasks, projectNameById]);
+  const executorFilterOptions = useMemo(() => {
+    const entries = new Map<string, string>();
+    tasks.forEach((task) => {
+      task.executorIds.forEach((userId) => {
+        entries.set(userId, memberMap.get(userId) ?? userId);
+      });
+    });
+    return Array.from(entries.entries())
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [tasks, memberMap]);
+
+  const taskGridRows = useMemo(() => {
+    const normalizeText = (value: string) => value.trim().toLowerCase();
+    const includesText = (source: string, query: string) =>
+      !query || normalizeText(source).includes(normalizeText(query));
+
+    return tasks
+      .map((task) => {
+        const dueDateValue = normalizeDateValue(task.dueDateCurrent || task.dueDateOriginal || '');
+        const situation = getTaskSituation(task);
+        const executorLabel = task.executorIds
+          .map((userId) => memberMap.get(userId) ?? userId)
+          .join(', ');
+        const projectLabel = task.projectId
+          ? (projectNameById.get(task.projectId) ?? 'Projeto')
+          : '-';
+
+        return {
+          task,
+          projectLabel,
+          situation,
+          executorLabel,
+          dueDateValue
+        };
+      })
+      .filter((row) => {
+        if (!includesText(row.task.description || row.task.name || '', taskGridFilters.description)) {
+          return false;
+        }
+        if (
+          taskGridFilters.projects.length &&
+          (!row.task.projectId || !taskGridFilters.projects.includes(row.task.projectId))
+        ) {
+          return false;
+        }
+        if (taskGridFilters.sectors.length && !taskGridFilters.sectors.includes(row.task.sector)) return false;
+        if (taskGridFilters.taskTypes.length && !taskGridFilters.taskTypes.includes(row.task.taskType)) {
+          return false;
+        }
+        if (taskGridFilters.priorities.length && !taskGridFilters.priorities.includes(row.task.priority)) {
+          return false;
+        }
+        if (taskGridFilters.statuses.length && !taskGridFilters.statuses.includes(row.task.status)) {
+          return false;
+        }
+        if (taskGridFilters.dueDate && row.dueDateValue !== taskGridFilters.dueDate) return false;
+        if (
+          taskGridFilters.executors.length &&
+          !taskGridFilters.executors.some((executorId) => row.task.executorIds.includes(executorId))
+        ) {
+          return false;
+        }
+        if (taskGridFilters.situations.length && !taskGridFilters.situations.includes(row.situation)) {
+          return false;
+        }
+        return true;
+      });
+  }, [memberMap, projectNameById, taskGridFilters, tasks]);
+
+  const filteredTasks = useMemo(() => taskGridRows.map((row) => row.task), [taskGridRows]);
+
+  const groupedTasksByStatus = useMemo(() => {
+    return statusOptions.map((status) => ({
+      status,
+      tasks: filteredTasks.filter((task) => task.status === status)
+    }));
+  }, [filteredTasks, statusOptions]);
+
+  const scheduledEvents = useMemo(() => {
+    return filteredTasks.flatMap((task) =>
+      (task.executionPeriods ?? [])
+        .filter((period) => period.date && period.startTime && period.endTime)
+        .map((period) => {
+          const start = new Date(`${period.date}T${period.startTime}`);
+          const end = new Date(`${period.date}T${period.endTime}`);
+          return {
+            task,
+            period,
+            start,
+            end
+          };
+        })
+        .filter((event) => !Number.isNaN(event.start.getTime()) && !Number.isNaN(event.end.getTime()))
+    );
+  }, [filteredTasks]);
+
+  const eventsByDay = useMemo(() => {
+    const map = new Map<string, typeof scheduledEvents>();
+    scheduledEvents.forEach((event) => {
+      const key = formatDateFns(event.start, 'yyyy-MM-dd');
+      const previous = map.get(key) ?? [];
+      map.set(key, [...previous, event]);
+    });
+    map.forEach((events, key) => {
+      map.set(
+        key,
+        [...events].sort((a, b) => a.start.getTime() - b.start.getTime())
+      );
+    });
+    return map;
+  }, [scheduledEvents]);
+
+  const detailTask = useMemo(
+    () => taskGridRows.find((row) => row.task.id === detailTaskId)?.task ?? null,
+    [detailTaskId, taskGridRows]
+  );
+
+  const downloadTaskGrid = async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Tarefas');
+    sheet.addRow([
+      'descricao',
+      'projeto',
+      'setor',
+      'tipo',
+      'prioridade',
+      'status',
+      'prazo',
+      'executor',
+      'situacao'
+    ]);
+
+    taskGridRows.forEach((row) => {
+      sheet.addRow([
+        row.task.description || row.task.name || '',
+        row.projectLabel,
+        row.task.sector || '',
+        row.task.taskType || '',
+        row.task.priority,
+        row.task.status,
+        normalizeDateValue(row.task.dueDateCurrent || row.task.dueDateOriginal || ''),
+        row.executorLabel || '',
+        row.situation
+      ]);
+    });
+
+    sheet.columns = [
+      { width: 48 },
+      { width: 26 },
+      { width: 22 },
+      { width: 22 },
+      { width: 14 },
+      { width: 18 },
+      { width: 14 },
+      { width: 34 },
+      { width: 14 }
+    ];
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'dashboard_tarefas.xlsx';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadDashboardPdf = async () => {
+    const captureNode = dashboardCaptureRef.current;
+    if (!captureNode) {
+      setSummaryMessage('Não foi possível capturar o dashboard para gerar o PDF.');
+      return;
+    }
+
+    const now = new Date();
+    const dateSuffix = now.toISOString().slice(0, 10);
+    const canvas = await html2canvas(captureNode, {
+      scale: 2,
+      useCORS: true,
+      backgroundColor: '#020617'
+    });
+    const imageData = canvas.toDataURL('image/png');
+
+    const pdf = new jsPDF({
+      orientation: canvas.width > canvas.height ? 'landscape' : 'portrait',
+      unit: 'pt',
+      format: 'a4'
+    });
+
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const imageRatio = canvas.width / canvas.height;
+    const pageRatio = pageWidth / pageHeight;
+
+    let renderWidth = pageWidth;
+    let renderHeight = pageWidth / imageRatio;
+    if (imageRatio < pageRatio) {
+      renderHeight = pageHeight;
+      renderWidth = pageHeight * imageRatio;
+    }
+
+    const x = (pageWidth - renderWidth) / 2;
+    const y = (pageHeight - renderHeight) / 2;
+    pdf.addImage(imageData, 'PNG', x, y, renderWidth, renderHeight);
+    pdf.save(`dashboard_${dateSuffix}.pdf`);
+  };
+
+  const generateDailySummary = async () => {
+    if (!selectedWorkspace?.id) return;
+
+    setSummaryLoading(true);
+    setSummaryMessage('Gerando resumo IA...');
+
+    try {
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
+
+      const { data, error } = await supabase.functions.invoke('send-daily-dashboard-summary', {
+        body: {
+          generateOnly: true,
+          workspaceId: selectedWorkspace.id,
+          projectId: projectFilterId === 'all' ? null : projectFilterId,
+          workspaceName: selectedWorkspace.name,
+          dayStart: start.toISOString(),
+          dayEnd: end.toISOString()
+        }
+      });
+
+      if (error) {
+        let detailedMessage = `Falha ao chamar a Edge Function: ${error.message}`;
+
+        if (error instanceof FunctionsHttpError) {
+          try {
+            const payload = await error.context.json();
+            const bodyError =
+              typeof payload?.error === 'string'
+                ? payload.error
+                : typeof payload?.message === 'string'
+                  ? payload.message
+                  : JSON.stringify(payload);
+            detailedMessage = `Edge Function retornou erro HTTP: ${bodyError}`;
+          } catch {
+            detailedMessage = `Edge Function retornou erro HTTP sem corpo legível: ${error.message}`;
+          }
+        } else if (error instanceof FunctionsFetchError) {
+          detailedMessage =
+            `Não foi possível alcançar a Edge Function (fetch error). ` +
+            `Verifique deploy/nome da função e conectividade. Detalhe: ${error.message}`;
+        } else if (error instanceof FunctionsRelayError) {
+          detailedMessage =
+            `Erro de relay ao chamar a Edge Function. ` +
+            `Tente novamente e verifique status do Supabase. Detalhe: ${error.message}`;
+        }
+
+        console.error('Erro detalhado Edge Function:', error);
+        throw new Error(detailedMessage);
+      }
+      if (data?.error) throw new Error(data.error);
+      if (typeof data?.summaryText === 'string') {
+        setSummaryText(data.summaryText);
+      }
+      setSummaryGeneratedAt(now.toISOString());
+
+      setSummaryMessage('Resumo gerado com sucesso. Agora você pode baixar o PDF.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Falha ao gerar resumo diário.';
+      setSummaryMessage(message);
+    } finally {
+      setSummaryLoading(false);
+    }
+  };
 
   const statusShare = useMemo(() => {
     if (!totalTasks) return [] as Array<{ status: TaskStatus; percent: number }>;
@@ -149,269 +772,1211 @@ export function DashboardSection({
           </div>
         ) : null}
 
-        <div className="rounded-3xl border border-[var(--panel-border)] bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.18),_rgba(15,23,42,0.08)_55%,_rgba(15,23,42,0.25))] p-6">
-          <div className="flex flex-wrap items-center justify-between gap-6">
-            <div>
-              <p className="text-xs uppercase tracking-[0.35em] text-[var(--text-secondary)]">
-                Dashboard
-              </p>
-              <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">
-                {selectedWorkspace?.name ?? 'Nenhum workspace'}
-              </h2>
-              <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                {selectedWorkspace?.description || 'Selecione ou crie um workspace.'}
-              </p>
-              <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-[var(--text-muted)]">
-                <span>Visao consolidada do workspace</span>
-                <span>•</span>
-                <span>{totalTasks} tarefas monitoradas</span>
+        <div className="rounded-2xl border border-[var(--panel-border)] bg-[var(--panel-bg-soft)] p-2">
+          <div className="inline-flex w-full flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveTab('dashboard')}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                activeTab === 'dashboard'
+                  ? 'bg-[var(--accent)] text-white'
+                  : 'text-[var(--text-secondary)] hover:bg-[var(--muted-bg)]'
+              }`}
+            >
+              Dashboard
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('tasks')}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                activeTab === 'tasks'
+                  ? 'bg-[var(--accent)] text-white'
+                  : 'text-[var(--text-secondary)] hover:bg-[var(--muted-bg)]'
+              }`}
+            >
+              Tarefas
+            </button>
+          </div>
+        </div>
+
+        {activeTab === 'dashboard' && (
+          <div ref={dashboardCaptureRef} className="space-y-4">
+            <div className="rounded-3xl border border-[var(--panel-border)] bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.18),_rgba(15,23,42,0.08)_55%,_rgba(15,23,42,0.25))] p-6">
+              <div className="flex flex-wrap items-center justify-between gap-6">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.35em] text-[var(--text-secondary)]">
+                    Dashboard
+                  </p>
+                  <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">
+                    {selectedWorkspace?.name ?? 'Nenhum workspace'}
+                  </h2>
+                  <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                    {selectedWorkspace?.description || 'Selecione ou crie um workspace.'}
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-[var(--text-muted)]">
+                    <span>Visao consolidada do workspace</span>
+                    <span>•</span>
+                    <span>{totalTasks} tarefas monitoradas</span>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-3 min-w-[260px]">
+                  <CustomSelect
+                    value={projectFilterId}
+                    onChange={(val) => onChangeProjectFilter(val)}
+                    options={[
+                      { value: 'all', label: 'Todos os projetos' },
+                      ...(selectedWorkspace?.projects ?? []).map((project) => ({
+                        value: project.id,
+                        label: project.name
+                      }))
+                    ]}
+                    placeholder="Filtrar por projeto"
+                  />
+                  <button
+                    type="button"
+                    onClick={onNewProject}
+                    disabled={!selectedWorkspace || !canManageWorkspaces}
+                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-[var(--panel-border)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-cyan-400/40 hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <IconLayers />
+                    Novo projeto
+                  </button>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void generateDailySummary();
+                      }}
+                      disabled={!selectedWorkspace || summaryLoading}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-[var(--panel-border)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-cyan-400/40 hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Sparkles size={14} />
+                      {summaryLoading ? 'Gerando...' : 'Gerar resumo IA'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void downloadDashboardPdf();
+                      }}
+                      disabled={!summaryGeneratedAt}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-[var(--panel-border)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-cyan-400/40 hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Download size={14} />
+                      Baixar PDF do dashboard
+                    </button>
+                  </div>
+                  {summaryMessage && (
+                    <p className="text-xs text-[var(--text-secondary)]">{summaryMessage}</p>
+                  )}
+                </div>
               </div>
             </div>
-            <div className="flex flex-col gap-3 min-w-[260px]">
-              <CustomSelect
-                value={projectFilterId}
-                onChange={(val) => onChangeProjectFilter(val)}
-                options={[
-                  { value: 'all', label: 'Todos os projetos' },
-                  ...(selectedWorkspace?.projects ?? []).map((project) => ({
-                    value: project.id,
-                    label: project.name
-                  }))
-                ]}
-                placeholder="Filtrar por projeto"
-              />
-              <button
-                type="button"
-                onClick={onNewProject}
-                disabled={!selectedWorkspace || !canManageWorkspaces}
-                className="inline-flex items-center justify-center gap-2 rounded-lg border border-[var(--panel-border)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-cyan-400/40 hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <IconLayers />
-                Novo projeto
-              </button>
-            </div>
-          </div>
-        </div>
 
-        <div className="grid gap-4 md:grid-cols-4">
-          <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
-            <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-              Total de tarefas
-            </p>
-            <div className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">
-              {totalTasks}
+            <div className="grid gap-4 md:grid-cols-4">
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
+                  Total de tarefas
+                </p>
+                <div className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">
+                  {totalTasks}
+                </div>
+                <div className="mt-3 h-1.5 w-full rounded-full bg-[var(--panel-border)]">
+                  <div
+                    className="h-1.5 rounded-full bg-cyan-400"
+                    style={{ width: `${Math.min(100, totalTasks * 4)}%` }}
+                  />
+                </div>
+              </div>
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
+                  Em execução
+                </p>
+                <div className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">
+                  {inProgressCount}
+                </div>
+                <p className="text-xs text-[var(--text-muted)] mt-1">
+                  +{validationCount} em validação
+                </p>
+              </div>
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
+                  Concluídas
+                </p>
+                <div className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">
+                  {doneCount}
+                </div>
+                <p className="text-xs text-[var(--text-muted)] mt-1">
+                  {blockedCount} bloqueadas
+                </p>
+              </div>
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
+                  Atrasadas
+                </p>
+                <div className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">
+                  {overdueCount}
+                </div>
+                <p className="text-xs text-[var(--text-muted)] mt-1">
+                  Backlog: {backlogCount}
+                </p>
+              </div>
             </div>
-            <div className="mt-3 h-1.5 w-full rounded-full bg-[var(--panel-border)]">
-              <div
-                className="h-1.5 rounded-full bg-cyan-400"
-                style={{ width: `${Math.min(100, totalTasks * 4)}%` }}
-              />
-            </div>
-          </div>
-          <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
-            <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-              Em execução
-            </p>
-            <div className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">
-              {inProgressCount}
-            </div>
-            <p className="text-xs text-[var(--text-muted)] mt-1">
-              +{validationCount} em validação
-            </p>
-          </div>
-          <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
-            <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-              Concluídas
-            </p>
-            <div className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">
-              {doneCount}
-            </div>
-            <p className="text-xs text-[var(--text-muted)] mt-1">
-              {blockedCount} bloqueadas
-            </p>
-          </div>
-          <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
-            <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-              Atrasadas
-            </p>
-            <div className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">
-              {overdueCount}
-            </div>
-            <p className="text-xs text-[var(--text-muted)] mt-1">
-              Backlog: {backlogCount}
-            </p>
-          </div>
-        </div>
 
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4 lg:col-span-2">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-[var(--text-primary)]">
-                Distribuição por status
-              </h3>
-              {dashboardLoading && (
-                <span className="text-xs text-[var(--text-muted)]">Atualizando...</span>
-              )}
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4 lg:col-span-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                    Distribuição por status
+                  </h3>
+                  {dashboardLoading && (
+                    <span className="text-xs text-[var(--text-muted)]">Atualizando...</span>
+                  )}
+                </div>
+                <div className="mt-4 grid gap-6 md:grid-cols-2">
+                  <div className="flex items-center gap-4">
+                    <div
+                      className="h-40 w-40 rounded-full"
+                      style={{
+                        background: `conic-gradient(${statusShare
+                          .map((item) => `${STATUS_COLORS[item.status]} ${item.percent}%`)
+                          .join(',')})`
+                      }}
+                    />
+                    <div className="space-y-2 text-xs text-[var(--text-secondary)]">
+                      {statusOptions.map((status) => (
+                        <div key={status} className="flex items-center gap-2">
+                          <span
+                            className="h-2.5 w-2.5 rounded-full"
+                            style={{ backgroundColor: STATUS_COLORS[status] }}
+                          />
+                          <span className="w-24">{status}</span>
+                          <span className="font-semibold text-[var(--text-primary)]">
+                            {statusCounts[status] ?? 0}
+                          </span>
+                        </div>
+                      ))}
+                      <div className="text-[var(--text-muted)]">Total: {totalTasks}</div>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-4">
+                    <div className="text-xs text-[var(--text-secondary)] uppercase tracking-[0.2em]">
+                      Percentual de conclusão
+                    </div>
+                    <div className="mt-4 flex items-center gap-4">
+                      <div
+                        className="h-32 w-32 rounded-full flex items-center justify-center"
+                        style={{
+                          background: `conic-gradient(#10b981 ${completionStats.percent}%, #1f2937 0)`
+                        }}
+                      >
+                        <div className="h-20 w-20 rounded-full bg-[var(--card-bg)] flex items-center justify-center">
+                          <span className="text-lg font-semibold text-[var(--text-primary)]">
+                            {completionStats.percent}%
+                          </span>
+                        </div>
+                      </div>
+                      <div className="text-xs text-[var(--text-secondary)] space-y-1">
+                        <div>
+                          Concluídas:{' '}
+                          <span className="text-[var(--text-primary)] font-semibold">{completionStats.done}</span>
+                        </div>
+                        <div>
+                          Outras (exceto backlog):{' '}
+                          <span className="text-[var(--text-primary)] font-semibold">{completionStats.other}</span>
+                        </div>
+                        <div className="text-[var(--text-muted)]">
+                          Base sem backlog: {totalTasks - backlogCount}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Tarefas por executor
+                </h3>
+                <div className="mt-4 space-y-3">
+                  {userCounts.map((item) => (
+                    <div key={item.userId}>
+                      <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
+                        <span>{item.label}</span>
+                        <span className="font-semibold text-[var(--text-primary)]">{item.count}</span>
+                      </div>
+                      <div className="mt-1 h-1.5 rounded-full bg-[var(--panel-border)]">
+                        <div
+                          className="h-1.5 rounded-full bg-cyan-400"
+                          style={{ width: `${Math.min(100, item.count * 10)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                  {!userCounts.length && (
+                    <div className="text-xs text-[var(--text-muted)]">
+                      Sem distribuicao por executor.
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
-            <div className="mt-4 grid gap-6 md:grid-cols-2">
-              <div className="flex items-center gap-4">
-                <div
-                  className="h-40 w-40 rounded-full"
-                  style={{
-                    background: `conic-gradient(${statusShare
-                      .map((item) => `${STATUS_COLORS[item.status]} ${item.percent}%`)
-                      .join(',')})`
-                  }}
-                />
-                <div className="space-y-2 text-xs text-[var(--text-secondary)]">
-                  {statusOptions.map((status) => (
-                    <div key={status} className="flex items-center gap-2">
-                      <span
-                        className="h-2.5 w-2.5 rounded-full"
-                        style={{ backgroundColor: STATUS_COLORS[status] }}
-                      />
-                      <span className="w-24">{status}</span>
-                      <span className="font-semibold text-[var(--text-primary)]">
-                        {statusCounts[status] ?? 0}
+
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4 lg:col-span-2">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Últimas interações
+                </h3>
+                <div className="mt-4 space-y-2">
+                  {dashboardEvents.map((event) => (
+                    <div
+                      key={event.id}
+                      className="flex items-start justify-between gap-3 rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2 text-xs"
+                    >
+                      <div>
+                        <p className="text-[var(--text-primary)]">{event.summary}</p>
+                        <p className="text-[var(--text-muted)]">
+                          {memberMap.get(event.userId) ?? event.userId}
+                        </p>
+                      </div>
+                      <span className="text-[var(--text-muted)]">
+                        {new Date(event.createdAt).toLocaleDateString('pt-BR')}
                       </span>
                     </div>
                   ))}
-                  <div className="text-[var(--text-muted)]">Total: {totalTasks}</div>
+                  {!dashboardEvents.length && (
+                    <div className="text-xs text-[var(--text-muted)]">
+                      Sem interações registradas.
+                    </div>
+                  )}
                 </div>
               </div>
-              <div className="rounded-xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-4">
-                <div className="text-xs text-[var(--text-secondary)] uppercase tracking-[0.2em]">
-                  Percentual de conclusão
-                </div>
-                <div className="mt-4 flex items-center gap-4">
-                  <div
-                    className="h-32 w-32 rounded-full flex items-center justify-center"
-                    style={{
-                      background: `conic-gradient(#10b981 ${completionStats.percent}%, #1f2937 0)`
-                    }}
-                  >
-                    <div className="h-20 w-20 rounded-full bg-[var(--card-bg)] flex items-center justify-center">
-                      <span className="text-lg font-semibold text-[var(--text-primary)]">
-                        {completionStats.percent}%
-                      </span>
-                    </div>
-                  </div>
-                  <div className="text-xs text-[var(--text-secondary)] space-y-1">
-                    <div>
-                      Concluídas: <span className="text-[var(--text-primary)] font-semibold">{completionStats.done}</span>
-                    </div>
-                    <div>
-                      Outras (exceto backlog):{' '}
-                      <span className="text-[var(--text-primary)] font-semibold">{completionStats.other}</span>
-                    </div>
-                    <div className="text-[var(--text-muted)]">
-                      Base sem backlog: {totalTasks - backlogCount}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
 
-          <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
-            <h3 className="text-sm font-semibold text-[var(--text-primary)]">
-              Tarefas por executor
-            </h3>
-            <div className="mt-4 space-y-3">
-              {userCounts.map((item) => (
-                <div key={item.userId}>
-                  <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
-                    <span>{item.label}</span>
-                    <span className="font-semibold text-[var(--text-primary)]">{item.count}</span>
-                  </div>
-                  <div className="mt-1 h-1.5 rounded-full bg-[var(--panel-border)]">
-                    <div
-                      className="h-1.5 rounded-full bg-cyan-400"
-                      style={{ width: `${Math.min(100, item.count * 10)}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-              {!userCounts.length && (
-                <div className="text-xs text-[var(--text-muted)]">
-                  Sem distribuicao por executor.
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4 lg:col-span-2">
-            <h3 className="text-sm font-semibold text-[var(--text-primary)]">
-              Últimas interações
-            </h3>
-            <div className="mt-4 space-y-2">
-              {dashboardEvents.map((event) => (
-                <div
-                  key={event.id}
-                  className="flex items-start justify-between gap-3 rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2 text-xs"
-                >
-                  <div>
-                    <p className="text-[var(--text-primary)]">{event.summary}</p>
-                    <p className="text-[var(--text-muted)]">
-                      {memberMap.get(event.userId) ?? 'Usuário'}
-                    </p>
-                  </div>
-                  <span className="text-[var(--text-muted)]">
-                    {new Date(event.createdAt).toLocaleDateString('pt-BR')}
-                  </span>
-                </div>
-              ))}
-              {!dashboardEvents.length && (
-                <div className="text-xs text-[var(--text-muted)]">
-                  Sem interações registradas.
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
-            <h3 className="text-sm font-semibold text-[var(--text-primary)]">
-              Projetos do workspace
-            </h3>
-            <div className="mt-4 space-y-3">
-              {selectedWorkspace?.projects.length ? (
-                selectedWorkspace.projects.map((project) => (
-                  <div
-                    key={project.id}
-                    className="rounded-2xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-3"
-                  >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <h4 className="text-sm font-semibold text-[var(--text-primary)]">
-                          {project.name}
-                        </h4>
-                        <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                          {project.summary || 'Sem resumo definido.'}
-                        </p>
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Projetos do workspace
+                </h3>
+                <div className="mt-4 space-y-3">
+                  {selectedWorkspace?.projects.length ? (
+                    selectedWorkspace.projects.map((project) => (
+                      <div
+                        key={project.id}
+                        className="rounded-2xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-3"
+                      >
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <h4 className="text-sm font-semibold text-[var(--text-primary)]">
+                              {project.name}
+                            </h4>
+                            <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                              {project.summary || 'Sem resumo definido.'}
+                            </p>
+                          </div>
+                          <span className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200">
+                            {project.status ?? 'Ativo'}
+                          </span>
+                        </div>
+                        <div className="mt-3 flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                          <IconBriefcase />
+                          Workspace: {selectedWorkspace?.name}
+                        </div>
                       </div>
-                      <span className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200">
-                        {project.status ?? 'Ativo'}
-                      </span>
+                    ))
+                  ) : (
+                    <div className="rounded-2xl border border-dashed border-[var(--panel-border)] bg-[var(--muted-bg)] p-6 text-center">
+                      <p className="text-sm text-[var(--text-secondary)]">
+                        Nenhum projeto por aqui ainda. Crie o primeiro projeto do workspace.
+                      </p>
                     </div>
-                    <div className="mt-3 flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                      <IconBriefcase />
-                      Workspace: {selectedWorkspace?.name}
+                  )}
+                </div>
+              </div>
+            </div>
+            {summaryText && (
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Resumo IA do dia
+                </h3>
+                <pre className="mt-3 whitespace-pre-wrap text-xs text-[var(--text-secondary)]">
+                  {summaryText}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'tasks' && (
+          <div className="rounded-2xl border border-[var(--panel-border)] bg-[linear-gradient(160deg,rgba(14,165,233,0.08),rgba(2,6,23,0.06))] p-4">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Tarefas
+                </h3>
+                <p className="text-xs text-[var(--text-secondary)]">
+                  Visualize em lista, board ou calendário.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1 rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] p-1">
+                  <button
+                    type="button"
+                    onClick={() => setTaskViewMode('list')}
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs transition ${
+                      taskViewMode === 'list'
+                        ? 'bg-[var(--accent)] text-white'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                    }`}
+                  >
+                    <List size={13} />
+                    Lista
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTaskViewMode('board')}
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs transition ${
+                      taskViewMode === 'board'
+                        ? 'bg-[var(--accent)] text-white'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                    }`}
+                  >
+                    <LayoutList size={13} />
+                    Board
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTaskViewMode('calendar')}
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs transition ${
+                      taskViewMode === 'calendar'
+                        ? 'bg-[var(--accent)] text-white'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                    }`}
+                  >
+                    <Calendar size={13} />
+                    Calendário
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setTaskGridFilters(DEFAULT_TASK_GRID_FILTERS)}
+                  className="rounded-lg border border-[var(--panel-border)] px-3 py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                >
+                  Limpar filtros
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void downloadTaskGrid();
+                  }}
+                  className="inline-flex items-center gap-2 rounded-lg border border-[var(--panel-border)] px-3 py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                >
+                  <Download size={13} />
+                  Baixar planilha
+                </button>
+              </div>
+            </div>
+
+            {taskViewMode === 'list' && (
+              <div className="rounded-xl border border-[var(--panel-border)] bg-[var(--panel-bg)] overflow-visible">
+                <div className="overflow-x-auto overflow-y-visible">
+                  <table className="min-w-[1260px] w-full border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-[var(--panel-border)] text-left text-[var(--text-secondary)] uppercase tracking-[0.15em] bg-[var(--panel-bg-soft)]">
+                      <th className="px-3 py-3 font-semibold">Descrição</th>
+                      <th className="px-3 py-2 font-semibold">Projeto</th>
+                      <th className="px-3 py-2 font-semibold">Setor</th>
+                      <th className="px-3 py-2 font-semibold">Tipo</th>
+                      <th className="px-3 py-2 font-semibold">Prioridade</th>
+                      <th className="px-3 py-2 font-semibold">Status</th>
+                      <th className="px-3 py-2 font-semibold">Prazo</th>
+                      <th className="px-3 py-2 font-semibold">Executor</th>
+                      <th className="px-3 py-2 font-semibold">Situação</th>
+                    </tr>
+                    <tr className="border-b border-[var(--panel-border)] bg-[var(--panel-bg)]">
+                      <th className="px-2 py-2">
+                        <input
+                          value={taskGridFilters.description}
+                          onChange={(event) =>
+                            setTaskGridFilters((prev) => ({ ...prev, description: event.target.value }))
+                          }
+                          className="w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 py-1.5 text-xs"
+                          placeholder="Filtrar..."
+                        />
+                      </th>
+                      <th className="px-2 py-2">
+                        <MultiFilterSelect
+                          options={projectFilterOptions}
+                          values={taskGridFilters.projects}
+                          onChange={(next) =>
+                            setTaskGridFilters((prev) => ({
+                              ...prev,
+                              projects: next
+                            }))
+                          }
+                          placeholder="Projetos"
+                        />
+                      </th>
+                      <th className="px-2 py-2">
+                        <MultiFilterSelect
+                          options={sectors.map((sector) => ({
+                            value: sector.name,
+                            label: sector.name
+                          }))}
+                          values={taskGridFilters.sectors}
+                          onChange={(next) =>
+                            setTaskGridFilters((prev) => ({
+                              ...prev,
+                              sectors: next
+                            }))
+                          }
+                          placeholder="Setores"
+                        />
+                      </th>
+                      <th className="px-2 py-2">
+                        <MultiFilterSelect
+                          options={taskTypes.map((type) => ({
+                            value: type.name,
+                            label: type.name
+                          }))}
+                          values={taskGridFilters.taskTypes}
+                          onChange={(next) =>
+                            setTaskGridFilters((prev) => ({
+                              ...prev,
+                              taskTypes: next
+                            }))
+                          }
+                          placeholder="Tipos"
+                        />
+                      </th>
+                      <th className="px-2 py-2">
+                        <MultiFilterSelect
+                          options={PRIORITY_OPTIONS.map((priority) => ({
+                            value: priority,
+                            label: priority
+                          }))}
+                          values={taskGridFilters.priorities}
+                          onChange={(next) =>
+                            setTaskGridFilters((prev) => ({
+                              ...prev,
+                              priorities: next as TaskPriority[]
+                            }))
+                          }
+                          placeholder="Prioridades"
+                        />
+                      </th>
+                      <th className="px-2 py-2">
+                        <MultiFilterSelect
+                          options={statusOptions.map((status) => ({
+                            value: status,
+                            label: status
+                          }))}
+                          values={taskGridFilters.statuses}
+                          onChange={(next) =>
+                            setTaskGridFilters((prev) => ({
+                              ...prev,
+                              statuses: next as TaskStatus[]
+                            }))
+                          }
+                          placeholder="Status"
+                        />
+                      </th>
+                      <th className="px-2 py-2">
+                        <input
+                          type="date"
+                          value={taskGridFilters.dueDate}
+                          onChange={(event) =>
+                            setTaskGridFilters((prev) => ({ ...prev, dueDate: event.target.value }))
+                          }
+                          className="w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 py-1.5 text-xs"
+                        />
+                      </th>
+                      <th className="px-2 py-2">
+                        <MultiFilterSelect
+                          options={executorFilterOptions}
+                          values={taskGridFilters.executors}
+                          onChange={(next) =>
+                            setTaskGridFilters((prev) => ({
+                              ...prev,
+                              executors: next
+                            }))
+                          }
+                          placeholder="Executores"
+                        />
+                      </th>
+                      <th className="px-2 py-2">
+                        <MultiFilterSelect
+                          options={[
+                            { value: 'No Prazo', label: 'No Prazo' },
+                            { value: 'Finalizada', label: 'Finalizada' },
+                            { value: 'Atrasada', label: 'Atrasada' }
+                          ]}
+                          values={taskGridFilters.situations}
+                          onChange={(next) =>
+                            setTaskGridFilters((prev) => ({
+                              ...prev,
+                              situations: next as TaskSituation[]
+                            }))
+                          }
+                          placeholder="Situação"
+                        />
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {taskGridRows.map((row) => (
+                      <tr
+                        key={row.task.id}
+                        onDoubleClick={() => {
+                          void openTaskDetail(row.task.id);
+                        }}
+                        className="border-b border-[var(--panel-border)] align-top transition-colors odd:bg-[var(--panel-bg)] even:bg-[var(--card-bg)] hover:bg-[var(--muted-bg)] cursor-pointer"
+                      >
+                        <td className="px-3 py-3">
+                          <p className="text-[var(--text-primary)] line-clamp-2 font-medium">
+                            {row.task.description || 'Sem descrição'}
+                          </p>
+                        </td>
+                        <td className="px-3 py-3 text-[var(--text-secondary)]">
+                          {row.projectLabel}
+                        </td>
+                        <td className="px-3 py-3 text-[var(--text-secondary)]">
+                          {row.task.sector ? (
+                            <span
+                              className="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5"
+                              style={{
+                                borderColor: `${sectorColorMap.get(row.task.sector) ?? '#475569'}55`,
+                                color: sectorColorMap.get(row.task.sector) ?? '#94a3b8'
+                              }}
+                            >
+                              <span
+                                className="h-2 w-2 rounded-full"
+                                style={{
+                                  backgroundColor: sectorColorMap.get(row.task.sector) ?? '#94a3b8'
+                                }}
+                              />
+                              {row.task.sector}
+                            </span>
+                          ) : (
+                            '-'
+                          )}
+                        </td>
+                        <td className="px-3 py-3 text-[var(--text-secondary)]">
+                          {row.task.taskType ? (
+                            <span
+                              className="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5"
+                              style={{
+                                borderColor: `${taskTypeColorMap.get(row.task.taskType) ?? '#475569'}55`,
+                                color: taskTypeColorMap.get(row.task.taskType) ?? '#94a3b8'
+                              }}
+                            >
+                              <span
+                                className="h-2 w-2 rounded-full"
+                                style={{
+                                  backgroundColor: taskTypeColorMap.get(row.task.taskType) ?? '#94a3b8'
+                                }}
+                              />
+                              {row.task.taskType}
+                            </span>
+                          ) : (
+                            '-'
+                          )}
+                        </td>
+                        <td className="px-3 py-3 text-[var(--text-secondary)]">{row.task.priority}</td>
+                        <td className="px-3 py-3 text-[var(--text-secondary)]">{row.task.status}</td>
+                        <td className="px-3 py-3 text-[var(--text-secondary)]">
+                          {formatDatePtBr(row.task.dueDateCurrent || row.task.dueDateOriginal)}
+                        </td>
+                        <td className="px-3 py-3 text-[var(--text-secondary)]">
+                          {row.executorLabel || '-'}
+                        </td>
+                        <td className="px-3 py-3">
+                          <span
+                            className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                              row.situation === 'Finalizada'
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : row.situation === 'Atrasada'
+                                  ? 'bg-rose-500/20 text-rose-300'
+                                  : 'bg-cyan-500/20 text-cyan-300'
+                            }`}
+                          >
+                            {row.situation}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {taskViewMode === 'board' && (
+              <div className="overflow-x-auto">
+                <div className="flex min-w-[1100px] gap-4">
+                  {groupedTasksByStatus.map((group) => (
+                    <div
+                      key={group.status}
+                      className="w-72 flex-shrink-0 rounded-xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-3"
+                    >
+                      <div className="mb-3 flex items-center justify-between">
+                        <div className="text-xs font-semibold text-[var(--text-primary)]">
+                          {group.status}
+                        </div>
+                        <div className="text-[11px] text-[var(--text-muted)]">{group.tasks.length}</div>
+                      </div>
+                      <div className="space-y-2">
+                        {group.tasks.map((task) => (
+                          <button
+                            key={task.id}
+                            type="button"
+                            onClick={() => {
+                              void openTaskDetail(task.id);
+                            }}
+                            className="w-full rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg-soft)] p-2 text-left hover:bg-[var(--muted-bg)]"
+                          >
+                            <div className="line-clamp-2 text-xs font-medium text-[var(--text-primary)]">
+                              {task.description || 'Sem descrição'}
+                            </div>
+                            <div className="mt-2 text-[10px] text-[var(--text-muted)]">
+                              Prazo: {formatDatePtBr(task.dueDateCurrent || task.dueDateOriginal)}
+                            </div>
+                          </button>
+                        ))}
+                        {!group.tasks.length && (
+                          <div className="rounded-md border border-dashed border-[var(--panel-border)] p-2 text-[11px] text-[var(--text-muted)]">
+                            Sem tarefas
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {taskViewMode === 'calendar' && (
+              <div className="rounded-xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-4">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const delta =
+                          calendarView === 'month'
+                            ? addMonths(calendarDate, -1)
+                            : calendarView === 'week'
+                              ? addWeeks(calendarDate, -1)
+                              : addDays(calendarDate, -1);
+                        setCalendarDate(delta);
+                      }}
+                      className="rounded-md border border-[var(--panel-border)] p-2 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                    >
+                      <ChevronLeft size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCalendarDate(new Date())}
+                      className="rounded-md border border-[var(--panel-border)] px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                    >
+                      Hoje
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const delta =
+                          calendarView === 'month'
+                            ? addMonths(calendarDate, 1)
+                            : calendarView === 'week'
+                              ? addWeeks(calendarDate, 1)
+                              : addDays(calendarDate, 1);
+                        setCalendarDate(delta);
+                      }}
+                      className="rounded-md border border-[var(--panel-border)] p-2 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                    >
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
+                  <div className="text-sm font-semibold text-[var(--text-primary)]">
+                    {formatDateFns(calendarDate, 'dd/MM/yyyy')}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {(['month', 'week', 'day'] as const).map((view) => (
+                      <button
+                        key={view}
+                        type="button"
+                        onClick={() => setCalendarView(view)}
+                        className={`rounded-md border px-3 py-1.5 text-xs font-semibold ${
+                          calendarView === view
+                            ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                            : 'border-[var(--panel-border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                        }`}
+                      >
+                        {view === 'month' ? 'Mês' : view === 'week' ? 'Semana' : 'Dia'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {calendarView === 'month' && (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-7 text-[11px] uppercase tracking-wider text-[var(--text-muted)]">
+                      {['D', 'S', 'T', 'Q', 'Q', 'S', 'S'].map((label) => (
+                        <div key={label} className="py-1 text-center">{label}</div>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-7 gap-2">
+                      {eachDayOfInterval({
+                        start: startOfWeek(startOfMonth(calendarDate)),
+                        end: endOfWeek(endOfMonth(calendarDate))
+                      }).map((day) => {
+                        const dayKey = formatDateFns(day, 'yyyy-MM-dd');
+                        const dayEvents = eventsByDay.get(dayKey) ?? [];
+                        const currentMonth = isSameMonth(day, calendarDate);
+                        const currentDay = isToday(day);
+                        return (
+                          <div
+                            key={dayKey}
+                            className={`min-h-[110px] rounded-md border p-2 ${
+                              currentDay
+                                ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
+                                : currentMonth
+                                  ? 'border-[var(--panel-border)] bg-[var(--panel-bg-soft)]'
+                                  : 'border-[var(--panel-border)] bg-[var(--muted-bg)] opacity-70'
+                            }`}
+                          >
+                            <div
+                              className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[10px] font-semibold ${
+                                currentDay ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)]'
+                              }`}
+                            >
+                              {formatDateFns(day, 'dd')}
+                            </div>
+                            <div className="mt-2 space-y-1">
+                              {dayEvents.slice(0, 2).map((event) => (
+                                <button
+                                  key={event.period.id}
+                                  type="button"
+                                  onClick={() => {
+                                    void openTaskDetail(event.task.id);
+                                  }}
+                                  className="w-full truncate rounded border border-[var(--panel-border)] bg-[var(--panel-bg)] px-1.5 py-1 text-left text-[10px] text-[var(--text-primary)] hover:bg-[var(--muted-bg)]"
+                                >
+                                  {formatDateFns(event.start, 'HH:mm')} {event.task.description || 'Sem descrição'}
+                                </button>
+                              ))}
+                              {dayEvents.length > 2 && (
+                                <div className="text-[10px] text-[var(--text-muted)]">
+                                  +{dayEvents.length - 2} períodos
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
-                ))
-              ) : (
-                <div className="rounded-2xl border border-dashed border-[var(--panel-border)] bg-[var(--muted-bg)] p-6 text-center">
-                  <p className="text-sm text-[var(--text-secondary)]">
-                    Nenhum projeto por aqui ainda. Crie o primeiro projeto do workspace.
-                  </p>
+                )}
+
+                {calendarView === 'week' && (
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
+                    {eachDayOfInterval({
+                      start: startOfWeek(calendarDate),
+                      end: endOfWeek(calendarDate)
+                    }).map((day) => {
+                      const dayKey = formatDateFns(day, 'yyyy-MM-dd');
+                      const dayEvents = eventsByDay.get(dayKey) ?? [];
+                      const currentDay = isToday(day);
+                      return (
+                        <div
+                          key={dayKey}
+                          className={`rounded-md border p-2 ${
+                            currentDay
+                              ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
+                              : 'border-[var(--panel-border)] bg-[var(--panel-bg-soft)]'
+                          }`}
+                        >
+                          <div className={`text-[11px] font-semibold ${currentDay ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}`}>
+                            {weekDayNames[day.getDay()]} • {formatDateFns(day, 'dd/MM')} {currentDay ? '• Hoje' : ''}
+                          </div>
+                          <div className="mt-2 space-y-1">
+                            {dayEvents.map((event) => (
+                              <button
+                                key={event.period.id}
+                                type="button"
+                                onClick={() => {
+                                  void openTaskDetail(event.task.id);
+                                }}
+                                className="w-full truncate rounded border border-[var(--panel-border)] bg-[var(--panel-bg)] px-1.5 py-1 text-left text-[10px] text-[var(--text-primary)] hover:bg-[var(--muted-bg)]"
+                              >
+                                {formatDateFns(event.start, 'HH:mm')} {event.task.description || 'Sem descrição'}
+                              </button>
+                            ))}
+                            {!dayEvents.length && (
+                              <div className="text-[10px] text-[var(--text-muted)]">Sem períodos</div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {calendarView === 'day' && (
+                  <div
+                    className={`rounded-md border p-3 ${
+                      isToday(calendarDate)
+                        ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
+                        : 'border-[var(--panel-border)] bg-[var(--panel-bg-soft)]'
+                    }`}
+                  >
+                    <div className={`text-sm font-semibold ${isToday(calendarDate) ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'}`}>
+                      {formatDateFns(calendarDate, 'dd/MM/yyyy')} {isToday(calendarDate) ? '• Hoje' : ''}
+                    </div>
+                    <div className="mt-3 space-y-2">
+                      {(eventsByDay.get(formatDateFns(calendarDate, 'yyyy-MM-dd')) ?? []).map((event) => (
+                        <button
+                          key={event.period.id}
+                          type="button"
+                          onClick={() => {
+                            void openTaskDetail(event.task.id);
+                          }}
+                          className="w-full rounded-md border border-[var(--panel-border)] bg-[var(--panel-bg)] px-2 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--muted-bg)]"
+                        >
+                          {formatDateFns(event.start, 'HH:mm')} - {formatDateFns(event.end, 'HH:mm')} •{' '}
+                          {event.task.description || 'Sem descrição'}
+                        </button>
+                      ))}
+                      {!((eventsByDay.get(formatDateFns(calendarDate, 'yyyy-MM-dd')) ?? []).length) && (
+                        <div className="text-xs text-[var(--text-muted)]">Nenhum período planejado.</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {!scheduledEvents.length && (
+                  <div className="mt-3 text-xs text-[var(--text-muted)]">
+                    Nenhuma tarefa filtrada possui períodos de execução definidos.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!taskGridRows.length && (
+              <div className="mt-4 rounded-xl border border-dashed border-[var(--panel-border)] bg-[var(--muted-bg)] p-5 text-center text-sm text-[var(--text-secondary)]">
+                Nenhuma tarefa encontrada com os filtros atuais.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {detailTask && (
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-black/20 backdrop-blur-sm"
+            onClick={() => setDetailTaskId(null)}
+          />
+          <div className="fixed top-0 right-0 z-50 h-full w-[800px] border-l border-[var(--panel-border)] bg-[var(--panel-bg)] shadow-2xl">
+            <div className="flex h-full flex-col">
+              <div className="flex items-center justify-between border-b border-[var(--panel-border)] px-6 py-4">
+                <div>
+                  <h3 className="font-semibold text-[var(--text-primary)]">Detalhes da tarefa</h3>
+                  <p className="text-xs text-[var(--text-muted)]">{detailTask.status}</p>
                 </div>
-              )}
+                <button
+                  type="button"
+                  onClick={() => setDetailTaskId(null)}
+                  className="rounded p-1 hover:bg-[var(--muted-bg)]"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="flex items-center gap-1 overflow-x-auto border-b border-[var(--panel-border)] px-6">
+                <button
+                  type="button"
+                  onClick={() => setDetailTaskTab('info')}
+                  className={`whitespace-nowrap border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
+                    detailTaskTab === 'info'
+                      ? 'border-[var(--accent)] text-[var(--text-primary)]'
+                      : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  Informações
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDetailTaskTab('time')}
+                  className={`whitespace-nowrap border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
+                    detailTaskTab === 'time'
+                      ? 'border-[var(--accent)] text-[var(--text-primary)]'
+                      : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  Controle de Tempo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDetailTaskTab('deadline')}
+                  className={`whitespace-nowrap border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
+                    detailTaskTab === 'deadline'
+                      ? 'border-[var(--accent)] text-[var(--text-primary)]'
+                      : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  Prazos
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDetailTaskTab('comments')}
+                  className={`whitespace-nowrap border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
+                    detailTaskTab === 'comments'
+                      ? 'border-[var(--accent)] text-[var(--text-primary)]'
+                      : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  Comentários
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDetailTaskTab('logs')}
+                  className={`whitespace-nowrap border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
+                    detailTaskTab === 'logs'
+                      ? 'border-[var(--accent)] text-[var(--text-primary)]'
+                      : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  Logs
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6">
+                {loadingTaskDetails && (
+                  <div className="rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg-soft)] px-3 py-2 text-xs text-[var(--text-muted)]">
+                    Carregando dados da tarefa...
+                  </div>
+                )}
+
+                {detailTaskTab === 'info' && (
+                  <div className="space-y-6">
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-[var(--text-secondary)]">Descrição</label>
+                      <div className="min-h-20 rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm text-[var(--text-primary)]">
+                        {detailTask.description || 'Sem descrição'}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-[var(--text-secondary)]">Setor</label>
+                        <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                          {detailTask.sector || '-'}
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-[var(--text-secondary)]">Tipo</label>
+                        <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                          {detailTask.taskType || '-'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-[var(--text-secondary)]">Prioridade</label>
+                        <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                          {detailTask.priority}
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-[var(--text-secondary)]">Status</label>
+                        <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                          {detailTask.status}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-[var(--text-secondary)]">Executor</label>
+                      <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                        {detailTask.executorIds.map((id) => memberMap.get(id) ?? id).join(', ') || '-'}
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-[var(--text-secondary)]">Validador</label>
+                      <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                        {detailTask.validatorIds.map((id) => memberMap.get(id) ?? id).join(', ') || '-'}
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-[var(--text-secondary)]">Informar</label>
+                      <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                        {detailTask.informIds.map((id) => memberMap.get(id) ?? id).join(', ') || '-'}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-[var(--text-secondary)]">Início</label>
+                        <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                          {formatDatePtBr(detailTask.startDate)}
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-[var(--text-secondary)]">Prazo de Entrega</label>
+                        <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                          {formatDatePtBr(detailTask.dueDateOriginal)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {detailTaskTab === 'time' && (
+                  <div className="space-y-6">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-[var(--text-secondary)]">Tempo estimado</label>
+                        <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                          {formatMinutes(detailTask.estimatedMinutes)}
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-[var(--text-secondary)]">Tempo efetivado</label>
+                        <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                          {formatMinutes(detailTask.actualMinutes)}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="text-xs font-semibold text-[var(--text-secondary)]">Histórico de tempo</div>
+                      <div className="space-y-2">
+                        {(timeEntries[detailTask.id] ?? []).map((entry) => (
+                          <div
+                            key={entry.id}
+                            className="flex items-center justify-between rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2 text-xs"
+                          >
+                            <div>
+                              <div className="font-medium text-[var(--text-primary)]">
+                                {formatMinutes(entry.durationMinutes)} ({entry.source})
+                              </div>
+                              <div className="text-[var(--text-muted)]">
+                                {formatDatePtBr(entry.startedAt)} - {formatDatePtBr(entry.endedAt)}
+                              </div>
+                            </div>
+                            <div className="text-[var(--text-muted)]">{entry.note || '-'}</div>
+                          </div>
+                        ))}
+                        {(timeEntries[detailTask.id] ?? []).length === 0 && (
+                          <div className="text-xs text-[var(--text-muted)]">Sem registros.</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {detailTaskTab === 'deadline' && (
+                  <div className="space-y-6">
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-[var(--text-secondary)]">Prazo Atual</label>
+                      <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                        {formatDatePtBr(detailTask.dueDateCurrent || detailTask.dueDateOriginal)}
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="text-xs font-semibold text-[var(--text-secondary)]">Histórico de prazo</div>
+                      <div className="space-y-2">
+                        {(dueDateChanges[detailTask.id] ?? []).map((change) => (
+                          <div
+                            key={change.id}
+                            className="rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2 text-xs"
+                          >
+                            <div className="font-medium text-[var(--text-primary)]">
+                              {formatDatePtBr(change.previousDate)} → {formatDatePtBr(change.newDate)}
+                            </div>
+                            <div className="text-[var(--text-muted)]">{change.reason || '-'}</div>
+                          </div>
+                        ))}
+                        {(dueDateChanges[detailTask.id] ?? []).length === 0 && (
+                          <div className="text-xs text-[var(--text-muted)]">Sem alterações.</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {detailTaskTab === 'logs' && (
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold text-[var(--text-secondary)]">Auditoria</div>
+                    <div className="space-y-2">
+                      {(auditLogs[detailTask.id] ?? []).map((log) => (
+                        <div
+                          key={log.id}
+                          className="rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2 text-xs"
+                        >
+                          <div className="font-medium text-[var(--text-primary)]">{log.field}</div>
+                          <div className="text-[var(--text-muted)]">
+                            {formatAuditValue(log.field, log.oldValue)} →{' '}
+                            {formatAuditValue(log.field, log.newValue)}
+                          </div>
+                          <div className="text-[var(--text-muted)]">
+                            {memberMap.get(log.changedBy) ?? log.changedBy} •{' '}
+                            {new Date(log.createdAt).toLocaleString('pt-BR')}
+                          </div>
+                        </div>
+                      ))}
+                      {(auditLogs[detailTask.id] ?? []).length === 0 && (
+                        <div className="text-xs text-[var(--text-muted)]">Sem registros.</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {detailTaskTab === 'comments' && (
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-[var(--text-secondary)]">
+                        Novo comentário
+                      </label>
+                      <textarea
+                        value={commentDraft}
+                        onChange={(event) => setCommentDraft(event.target.value)}
+                        className="w-full min-h-20 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                        placeholder="Escreva um comentário..."
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void Promise.resolve(onAddTaskComment(detailTask.id, commentDraft)).then(() => {
+                            setCommentDraft('');
+                          });
+                        }}
+                        className="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white"
+                        disabled={!commentDraft.trim()}
+                      >
+                        Comentar
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {(taskComments[detailTask.id] ?? []).map((comment) => (
+                        <div
+                          key={comment.id}
+                          className="rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2"
+                        >
+                          <div className="text-xs text-[var(--text-muted)]">
+                            {memberMap.get(comment.createdBy) ?? comment.createdBy} •{' '}
+                            {new Date(comment.createdAt).toLocaleString('pt-BR')}
+                          </div>
+                          <div className="mt-1 text-sm text-[var(--text-primary)] whitespace-pre-wrap">
+                            {comment.content}
+                          </div>
+                        </div>
+                      ))}
+                      {(taskComments[detailTask.id] ?? []).length === 0 && (
+                        <div className="text-xs text-[var(--text-muted)]">Sem comentários.</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      </div>
+        </>
+      )}
     </div>
   );
 }

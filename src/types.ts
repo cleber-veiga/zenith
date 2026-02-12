@@ -29,6 +29,11 @@ export type Workspace = {
   createdBy: string;
 };
 
+export type WorkspaceTagOption = {
+  name: string;
+  color: string;
+};
+
 export type SystemView = 'dashboard' | 'project' | 'settings' | 'members' | 'profile';
 
 export type TaskPriority = 'Baixa' | 'Média' | 'Alta' | 'Crítica';
@@ -44,8 +49,16 @@ export type TaskStatus =
 
 export type TaskPeopleRole = 'executor' | 'validator' | 'inform';
 
+export type TaskExecutionPeriod = {
+  id: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+};
+
 export type ProjectTask = {
   id: string;
+  projectId?: string;
   name: string;
   description: string;
   sector: string;
@@ -58,8 +71,10 @@ export type ProjectTask = {
   dueDateCurrent: string;
   estimatedMinutes: number;
   actualMinutes: number;
+  executionPeriods: TaskExecutionPeriod[];
   priority: TaskPriority;
   status: TaskStatus;
+  displayOrder?: number;
 };
 
 export type TaskTimeEntry = {
@@ -90,5 +105,13 @@ export type TaskAuditLog = {
   oldValue: string | null;
   newValue: string | null;
   changedBy: string;
+  createdAt: string;
+};
+
+export type TaskComment = {
+  id: string;
+  taskId: string;
+  content: string;
+  createdBy: string;
   createdAt: string;
 };

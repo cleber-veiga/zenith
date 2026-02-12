@@ -17,6 +17,7 @@ type SidebarProps = {
   collapsed: boolean;
   currentView: SystemView;
   isSuperUser: boolean;
+  isViewer: boolean;
   canManageWorkspaces: boolean;
   userId: string;
   workspaces: Workspace[];
@@ -38,6 +39,7 @@ export function Sidebar({
   collapsed,
   currentView,
   isSuperUser,
+  isViewer,
   canManageWorkspaces,
   userId,
   workspaces,
@@ -161,7 +163,7 @@ export function Sidebar({
                 )}
               </div>
 
-              {isExpanded && (
+              {isExpanded && !isViewer && (
                 <div
                   className={`${
                     collapsed
@@ -236,19 +238,21 @@ export function Sidebar({
         )}
       </div>
 
-      <div className="p-3 border-t border-[var(--panel-border)]">
-        <button
-          type="button"
-          onClick={() => onSelectView('settings')}
-          className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--muted-bg)] hover:text-[var(--text-primary)] rounded transition-colors ${
-            collapsed ? 'justify-center' : ''
-          }`}
-          title={collapsed ? 'Configurações' : ''}
-        >
-          <Settings size={16} />
-          {!collapsed && 'Configurações'}
-        </button>
-      </div>
+      {canManageWorkspaces && (
+        <div className="p-3 border-t border-[var(--panel-border)]">
+          <button
+            type="button"
+            onClick={() => onSelectView('settings')}
+            className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--muted-bg)] hover:text-[var(--text-primary)] rounded transition-colors ${
+              collapsed ? 'justify-center' : ''
+            }`}
+            title={collapsed ? 'Configurações' : ''}
+          >
+            <Settings size={16} />
+            {!collapsed && 'Configurações'}
+          </button>
+        </div>
+      )}
     </aside>
   );
 }

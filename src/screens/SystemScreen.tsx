@@ -6,10 +6,12 @@ import type {
   ProjectTask,
   SystemView,
   TaskAuditLog,
+  TaskComment,
   TaskDueDateChange,
   TaskTimeEntry,
   UserProfile,
   UserRole,
+  WorkspaceTagOption,
   Workspace
 } from '../types';
 import { Topbar } from '../components/Topbar';
@@ -96,6 +98,15 @@ export function SystemScreen({
       validated?: boolean;
     }>
   >([]);
+  const [dashboardMembers, setDashboardMembers] = useState<
+    Array<{
+      userId: string;
+      fullName?: string | null;
+      title?: string | null;
+      avatarUrl?: string | null;
+      email?: string | null;
+    }>
+  >([]);
   const [projectMembers, setProjectMembers] = useState<
     Array<{
       userId: string;
@@ -125,10 +136,13 @@ export function SystemScreen({
     {}
   );
   const [taskAuditLogs, setTaskAuditLogs] = useState<Record<string, TaskAuditLog[]>>({});
-  const [sectorOptions, setSectorOptions] = useState<string[]>([]);
-  const [taskTypeOptions, setTaskTypeOptions] = useState<string[]>([]);
+  const [taskComments, setTaskComments] = useState<Record<string, TaskComment[]>>({});
+  const [sectorOptions, setSectorOptions] = useState<WorkspaceTagOption[]>([]);
+  const [taskTypeOptions, setTaskTypeOptions] = useState<WorkspaceTagOption[]>([]);
   const [newSectorName, setNewSectorName] = useState('');
+  const [newSectorColor, setNewSectorColor] = useState('#0ea5e9');
   const [newTaskTypeName, setNewTaskTypeName] = useState('');
+  const [newTaskTypeColor, setNewTaskTypeColor] = useState('#8b5cf6');
   const [dashboardProjectId, setDashboardProjectId] = useState<string>('all');
   const [dashboardTasks, setDashboardTasks] = useState<ProjectTask[]>([]);
   const [dashboardEvents, setDashboardEvents] = useState<
@@ -145,6 +159,7 @@ export function SystemScreen({
   const [settingsTab, setSettingsTab] = useState<'general' | 'members'>('general');
 
   const canManageWorkspaces = isSuperUser || userRole === 'manager';
+  const isViewer = userRole === 'viewer';
   const memberWorkspaces = isSuperUser
     ? workspaces
     : workspaces
@@ -274,13 +289,17 @@ export function SystemScreen({
           'start_date',
           'due_date_original',
           'due_date_current',
+          'execution_periods',
           'estimated_minutes',
           'actual_minutes',
           'priority',
-          'status'
+          'status',
+          'display_order'
         ].join(', ')
       )
       .eq('project_id', projectId)
+      .order('status', { ascending: true })
+      .order('display_order', { ascending: true })
       .order('created_at', { ascending: true });
 
     if (tasksError) {
@@ -310,6 +329,7 @@ export function SystemScreen({
       const name = row.name ?? description;
       return {
         id: row.id,
+        projectId: projectId,
         name,
         description,
       sector: row.sector ?? '',
@@ -320,10 +340,12 @@ export function SystemScreen({
       startDate: row.start_date ?? '',
       dueDateOriginal: row.due_date_original ?? '',
       dueDateCurrent: row.due_date_current ?? '',
+      executionPeriods: (row.execution_periods as ProjectTask['executionPeriods'] | null) ?? [],
       estimatedMinutes: row.estimated_minutes ?? 0,
       actualMinutes: row.actual_minutes ?? 0,
         priority: (row.priority ?? 'Média') as ProjectTask['priority'],
-        status: normalizeStatus(row.status ?? 'Backlog')
+        status: normalizeStatus(row.status ?? 'Backlog'),
+        displayOrder: row.display_order ?? 0
       };
     });
 
@@ -341,6 +363,7 @@ export function SystemScreen({
     if (!projectIds.length) {
       setDashboardTasks([]);
       setDashboardEvents([]);
+      setDashboardMembers([]);
       setDashboardLoading(false);
       return;
     }
@@ -362,13 +385,18 @@ export function SystemScreen({
           'start_date',
           'due_date_original',
           'due_date_current',
+          'execution_periods',
           'estimated_minutes',
           'actual_minutes',
           'priority',
-          'status'
+          'status',
+          'display_order'
         ].join(', ')
       )
-      .in('project_id', projectIds);
+      .in('project_id', projectIds)
+      .order('status', { ascending: true })
+      .order('display_order', { ascending: true })
+      .order('created_at', { ascending: true });
 
     if (taskError) {
       console.error('Erro ao carregar dashboard:', taskError);
@@ -395,6 +423,7 @@ export function SystemScreen({
 
     const mappedTasks: ProjectTask[] = (taskRows ?? []).map((row) => ({
       id: row.id,
+      projectId: row.project_id,
       name: row.name ?? row.description ?? '',
       description: row.description ?? row.name ?? '',
       sector: row.sector ?? '',
@@ -405,13 +434,52 @@ export function SystemScreen({
       startDate: row.start_date ?? '',
       dueDateOriginal: row.due_date_original ?? '',
       dueDateCurrent: row.due_date_current ?? '',
+      executionPeriods: (row.execution_periods as ProjectTask['executionPeriods'] | null) ?? [],
       estimatedMinutes: row.estimated_minutes ?? 0,
       actualMinutes: row.actual_minutes ?? 0,
       priority: (row.priority ?? 'Média') as ProjectTask['priority'],
-      status: normalizeStatus(row.status ?? 'Backlog')
+      status: normalizeStatus(row.status ?? 'Backlog'),
+      displayOrder: row.display_order ?? 0
     }));
 
     setDashboardTasks(mappedTasks);
+
+    const dashboardMemberIds = Array.from(
+      new Set(
+        mappedTasks.flatMap((task) => [
+          ...task.executorIds,
+          ...task.validatorIds,
+          ...task.informIds
+        ])
+      )
+    );
+
+    if (dashboardMemberIds.length) {
+      const { data: profiles, error: profilesError } = await supabase.rpc('get_profiles_with_email', {
+        user_ids: dashboardMemberIds
+      });
+      if (profilesError) {
+        console.error('Erro ao carregar perfis no dashboard:', profilesError);
+      } else {
+        setDashboardMembers(
+          (profiles ?? []).map((profile: {
+            user_id: string;
+            full_name?: string | null;
+            title?: string | null;
+            avatar_url?: string | null;
+            email?: string | null;
+          }) => ({
+            userId: profile.user_id,
+            fullName: profile.full_name ?? null,
+            title: profile.title ?? null,
+            avatarUrl: profile.avatar_url ?? null,
+            email: profile.email ?? null
+          }))
+        );
+      }
+    } else {
+      setDashboardMembers([]);
+    }
 
     const taskIds = mappedTasks.map((item) => item.id);
     if (!taskIds.length) {
@@ -503,12 +571,12 @@ export function SystemScreen({
       await Promise.all([
         supabase
           .from('sectors')
-          .select('name')
+          .select('name, color')
           .eq('workspace_id', workspaceId)
           .order('name', { ascending: true }),
         supabase
           .from('task_types')
-          .select('name')
+          .select('name, color')
           .eq('workspace_id', workspaceId)
           .order('name', { ascending: true })
       ]);
@@ -516,8 +584,18 @@ export function SystemScreen({
     if (sectorError) console.error('Erro ao carregar setores:', sectorError);
     if (typeError) console.error('Erro ao carregar tipos:', typeError);
 
-    setSectorOptions((sectorRows ?? []).map((row) => row.name));
-    setTaskTypeOptions((typeRows ?? []).map((row) => row.name));
+    setSectorOptions(
+      (sectorRows ?? []).map((row) => ({
+        name: row.name,
+        color: row.color ?? '#64748b'
+      }))
+    );
+    setTaskTypeOptions(
+      (typeRows ?? []).map((row) => ({
+        name: row.name,
+        color: row.color ?? '#64748b'
+      }))
+    );
   };
 
   useEffect(() => {
@@ -648,6 +726,10 @@ export function SystemScreen({
   };
 
   const handleAddSector = async () => {
+    if (!canManageWorkspaces) {
+      alert('Você não tem permissão para criar setores neste workspace.');
+      return;
+    }
     if (!selectedWorkspaceId) return;
     if (!newSectorName.trim()) return;
     const { data, error } = await supabase
@@ -655,19 +737,32 @@ export function SystemScreen({
       .insert({
         workspace_id: selectedWorkspaceId,
         name: newSectorName.trim(),
+        color: newSectorColor,
         created_by: userId
       })
-      .select('name')
+      .select('name, color')
       .single();
     if (error || !data) {
       console.error('Erro ao criar setor:', error);
+      if (error?.code === '42501' || error?.message?.toLowerCase().includes('permission')) {
+        alert('Permissão negada para criar setor. Verifique se seu perfil é gerente neste workspace.');
+      }
       return;
     }
-    setSectorOptions((prev) => [...prev, data.name].sort((a, b) => a.localeCompare(b)));
+    setSectorOptions((prev) =>
+      [...prev, { name: data.name, color: data.color ?? '#64748b' }].sort((a, b) =>
+        a.name.localeCompare(b.name)
+      )
+    );
     setNewSectorName('');
+    setNewSectorColor('#0ea5e9');
   };
 
   const handleRemoveSector = async (name: string) => {
+    if (!canManageWorkspaces) {
+      alert('Você não tem permissão para remover setores neste workspace.');
+      return;
+    }
     if (!selectedWorkspaceId) return;
     const { error } = await supabase
       .from('sectors')
@@ -676,12 +771,45 @@ export function SystemScreen({
       .eq('name', name);
     if (error) {
       console.error('Erro ao remover setor:', error);
+      if (error?.code === '42501' || error?.message?.toLowerCase().includes('permission')) {
+        alert('Permissão negada para remover setor.');
+      }
       return;
     }
-    setSectorOptions((prev) => prev.filter((item) => item !== name));
+    setSectorOptions((prev) => prev.filter((item) => item.name !== name));
+  };
+
+  const handleUpdateSectorColor = async (name: string, color: string) => {
+    if (!canManageWorkspaces) {
+      alert('Você não tem permissão para editar setores neste workspace.');
+      return;
+    }
+    if (!selectedWorkspaceId) return;
+    const nextColor = color || '#64748b';
+    const previous = sectorOptions;
+    setSectorOptions((prev) =>
+      prev.map((item) => (item.name === name ? { ...item, color: nextColor } : item))
+    );
+    const { error } = await supabase
+      .from('sectors')
+      .update({ color: nextColor })
+      .eq('workspace_id', selectedWorkspaceId)
+      .eq('name', name);
+
+    if (error) {
+      console.error('Erro ao atualizar cor do setor:', error);
+      if (error?.code === '42501' || error?.message?.toLowerCase().includes('permission')) {
+        alert('Permissão negada para editar setor.');
+      }
+      setSectorOptions(previous);
+    }
   };
 
   const handleAddTaskType = async () => {
+    if (!canManageWorkspaces) {
+      alert('Você não tem permissão para criar tipos neste workspace.');
+      return;
+    }
     if (!selectedWorkspaceId) return;
     if (!newTaskTypeName.trim()) return;
     const { data, error } = await supabase
@@ -689,19 +817,32 @@ export function SystemScreen({
       .insert({
         workspace_id: selectedWorkspaceId,
         name: newTaskTypeName.trim(),
+        color: newTaskTypeColor,
         created_by: userId
       })
-      .select('name')
+      .select('name, color')
       .single();
     if (error || !data) {
       console.error('Erro ao criar tipo:', error);
+      if (error?.code === '42501' || error?.message?.toLowerCase().includes('permission')) {
+        alert('Permissão negada para criar tipo. Verifique se seu perfil é gerente neste workspace.');
+      }
       return;
     }
-    setTaskTypeOptions((prev) => [...prev, data.name].sort((a, b) => a.localeCompare(b)));
+    setTaskTypeOptions((prev) =>
+      [...prev, { name: data.name, color: data.color ?? '#64748b' }].sort((a, b) =>
+        a.name.localeCompare(b.name)
+      )
+    );
     setNewTaskTypeName('');
+    setNewTaskTypeColor('#8b5cf6');
   };
 
   const handleRemoveTaskType = async (name: string) => {
+    if (!canManageWorkspaces) {
+      alert('Você não tem permissão para remover tipos neste workspace.');
+      return;
+    }
     if (!selectedWorkspaceId) return;
     const { error } = await supabase
       .from('task_types')
@@ -710,9 +851,38 @@ export function SystemScreen({
       .eq('name', name);
     if (error) {
       console.error('Erro ao remover tipo:', error);
+      if (error?.code === '42501' || error?.message?.toLowerCase().includes('permission')) {
+        alert('Permissão negada para remover tipo.');
+      }
       return;
     }
-    setTaskTypeOptions((prev) => prev.filter((item) => item !== name));
+    setTaskTypeOptions((prev) => prev.filter((item) => item.name !== name));
+  };
+
+  const handleUpdateTaskTypeColor = async (name: string, color: string) => {
+    if (!canManageWorkspaces) {
+      alert('Você não tem permissão para editar tipos neste workspace.');
+      return;
+    }
+    if (!selectedWorkspaceId) return;
+    const nextColor = color || '#64748b';
+    const previous = taskTypeOptions;
+    setTaskTypeOptions((prev) =>
+      prev.map((item) => (item.name === name ? { ...item, color: nextColor } : item))
+    );
+    const { error } = await supabase
+      .from('task_types')
+      .update({ color: nextColor })
+      .eq('workspace_id', selectedWorkspaceId)
+      .eq('name', name);
+
+    if (error) {
+      console.error('Erro ao atualizar cor do tipo:', error);
+      if (error?.code === '42501' || error?.message?.toLowerCase().includes('permission')) {
+        alert('Permissão negada para editar tipo.');
+      }
+      setTaskTypeOptions(previous);
+    }
   };
 
   const handleEditProjectSave = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -919,6 +1089,16 @@ export function SystemScreen({
   };
 
   useEffect(() => {
+    if (!isViewer) return;
+    if (currentView !== 'dashboard') {
+      setCurrentView('dashboard');
+    }
+    if (selectedProjectId) {
+      setSelectedProjectId(null);
+    }
+  }, [isViewer, currentView, selectedProjectId]);
+
+  useEffect(() => {
     const shouldLoadMembers =
       currentView === 'project' ||
       currentView === 'dashboard' ||
@@ -933,13 +1113,28 @@ export function SystemScreen({
     void loadDashboardData(selectedWorkspaceId, dashboardProjectId);
   }, [currentView, selectedWorkspaceId, dashboardProjectId, workspaces.length]);
 
+  useEffect(() => {
+    if (canManageWorkspaces) return;
+    if (currentView === 'settings') {
+      setCurrentView('dashboard');
+      setSettingsTab('general');
+    }
+  }, [canManageWorkspaces, currentView]);
+
   const handleAddTask = async (projectId: string, task: Omit<ProjectTask, 'id'>) => {
     const dueDateCurrent = task.dueDateCurrent || task.dueDateOriginal || '';
+    const currentTasks = projectTaskState[projectId] ?? [];
+    const maxOrderForStatus = currentTasks
+      .filter((item) => item.status === task.status)
+      .reduce((acc, item) => Math.max(acc, item.displayOrder ?? 0), -1);
+    const nextDisplayOrder = task.displayOrder ?? maxOrderForStatus + 1;
     const nextTask: ProjectTask = {
       id: crypto.randomUUID(),
       ...task,
+      executionPeriods: task.executionPeriods ?? [],
       name: task.name || task.description || '',
-      dueDateCurrent
+      dueDateCurrent,
+      displayOrder: nextDisplayOrder
     };
 
     setProjectTaskState((prev) => {
@@ -963,10 +1158,12 @@ export function SystemScreen({
       start_date: nextTask.startDate || null,
       due_date_original: nextTask.dueDateOriginal || null,
       due_date_current: nextTask.dueDateCurrent || nextTask.dueDateOriginal || null,
+      execution_periods: nextTask.executionPeriods,
       estimated_minutes: nextTask.estimatedMinutes || 0,
       actual_minutes: nextTask.actualMinutes || 0,
       priority: nextTask.priority,
       status: nextTask.status,
+      display_order: nextTask.displayOrder ?? 0,
       created_by: userId
     });
 
@@ -983,6 +1180,90 @@ export function SystemScreen({
     }
   };
 
+  const handleAddTasksBulk = async (
+    projectId: string,
+    tasksToCreate: Array<Omit<ProjectTask, 'id'>>
+  ): Promise<{ created: number; failed: number; message?: string }> => {
+    if (!tasksToCreate.length) {
+      return { created: 0, failed: 0 };
+    }
+
+    const currentTasks = projectTaskState[projectId] ?? [];
+    const maxByStatus = new Map<ProjectTask['status'], number>();
+    currentTasks.forEach((item) => {
+      maxByStatus.set(item.status, Math.max(maxByStatus.get(item.status) ?? -1, item.displayOrder ?? 0));
+    });
+
+    const preparedTasks: ProjectTask[] = tasksToCreate.map((task) => {
+      const dueDateCurrent = task.dueDateCurrent || task.dueDateOriginal || '';
+      const nextOrderBase = maxByStatus.get(task.status) ?? -1;
+      const nextOrder = task.displayOrder ?? nextOrderBase + 1;
+      maxByStatus.set(task.status, nextOrder);
+      return {
+        id: crypto.randomUUID(),
+        ...task,
+        executionPeriods: task.executionPeriods ?? [],
+        name: task.name || task.description || '',
+        dueDateCurrent,
+        displayOrder: nextOrder
+      };
+    });
+
+    setProjectTaskState((prev) => {
+      const current = prev[projectId] ?? [];
+      return {
+        ...prev,
+        [projectId]: [...current, ...preparedTasks]
+      };
+    });
+
+    const { error } = await supabase.from('project_tasks').insert(
+      preparedTasks.map((task) => ({
+        id: task.id,
+        project_id: projectId,
+        name: task.name,
+        description: task.description || null,
+        sector: task.sector || null,
+        task_type: task.taskType || null,
+        executor_ids: task.executorIds,
+        validator_ids: task.validatorIds,
+        inform_ids: task.informIds,
+        start_date: task.startDate || null,
+        due_date_original: task.dueDateOriginal || null,
+        due_date_current: task.dueDateCurrent || task.dueDateOriginal || null,
+        execution_periods: task.executionPeriods,
+        estimated_minutes: task.estimatedMinutes || 0,
+        actual_minutes: task.actualMinutes || 0,
+        priority: task.priority,
+        status: task.status,
+        display_order: task.displayOrder ?? 0,
+        created_by: userId
+      }))
+    );
+
+    if (error) {
+      console.error('Erro ao importar tarefas em massa:', error);
+      const rollbackIds = new Set(preparedTasks.map((task) => task.id));
+      setProjectTaskState((prev) => {
+        const current = prev[projectId] ?? [];
+        return {
+          ...prev,
+          [projectId]: current.filter((task) => !rollbackIds.has(task.id))
+        };
+      });
+      return {
+        created: 0,
+        failed: tasksToCreate.length,
+        message: error.message
+      };
+    }
+
+    return {
+      created: preparedTasks.length,
+      failed: 0
+    };
+  };
+
   const mapTaskUpdatesToRow = (updates: Partial<ProjectTask>) => {
     const payload: Record<string, unknown> = {};
     if (updates.name !== undefined) payload.name = updates.name;
@@ -995,10 +1276,12 @@ export function SystemScreen({
     if (updates.startDate !== undefined) payload.start_date = updates.startDate || null;
     if (updates.dueDateOriginal !== undefined) payload.due_date_original = updates.dueDateOriginal || null;
     if (updates.dueDateCurrent !== undefined) payload.due_date_current = updates.dueDateCurrent || null;
+    if (updates.executionPeriods !== undefined) payload.execution_periods = updates.executionPeriods;
     if (updates.estimatedMinutes !== undefined) payload.estimated_minutes = updates.estimatedMinutes;
     if (updates.actualMinutes !== undefined) payload.actual_minutes = updates.actualMinutes;
     if (updates.priority !== undefined) payload.priority = updates.priority;
     if (updates.status !== undefined) payload.status = updates.status;
+    if (updates.displayOrder !== undefined) payload.display_order = updates.displayOrder;
     return payload;
   };
 
@@ -1021,7 +1304,8 @@ export function SystemScreen({
       estimatedMinutes: 'Tempo de Execução estimado',
       actualMinutes: 'Tempo de Execução efetivado',
       priority: 'Prioridade',
-      status: 'Status da Tarefa'
+      status: 'Status da Tarefa',
+      displayOrder: 'Ordem'
     };
 
     const serialize = (value: unknown) => {
@@ -1197,7 +1481,7 @@ export function SystemScreen({
   };
 
   const handleLoadTaskExtras = async (taskId: string) => {
-    const [timeResult, dueResult, auditResult] = await Promise.all([
+    const [timeResult, dueResult, auditResult, commentsResult] = await Promise.all([
       supabase
         .from('project_task_time_entries')
         .select('id, task_id, started_at, ended_at, duration_minutes, created_by, note, source')
@@ -1212,12 +1496,18 @@ export function SystemScreen({
         .from('project_task_audit_logs')
         .select('id, task_id, field, old_value, new_value, changed_by, created_at')
         .eq('task_id', taskId)
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('project_task_comments')
+        .select('id, task_id, content, created_by, created_at')
+        .eq('task_id', taskId)
         .order('created_at', { ascending: false })
     ]);
 
     if (timeResult.error) console.error('Erro ao carregar tempo:', timeResult.error);
     if (dueResult.error) console.error('Erro ao carregar alterações de prazo:', dueResult.error);
     if (auditResult.error) console.error('Erro ao carregar auditoria:', auditResult.error);
+    if (commentsResult.error) console.error('Erro ao carregar comentários:', commentsResult.error);
 
     setTaskTimeEntries((prev) => ({
       ...prev,
@@ -1256,6 +1546,48 @@ export function SystemScreen({
         createdAt: row.created_at
       }))
     }));
+    setTaskComments((prev) => ({
+      ...prev,
+      [taskId]: (commentsResult.data ?? []).map((row) => ({
+        id: row.id,
+        taskId: row.task_id,
+        content: row.content ?? '',
+        createdBy: row.created_by,
+        createdAt: row.created_at
+      }))
+    }));
+  };
+
+  const handleAddTaskComment = async (taskId: string, content: string) => {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+
+    const { data, error } = await supabase
+      .from('project_task_comments')
+      .insert({
+        task_id: taskId,
+        content: trimmed,
+        created_by: userId
+      })
+      .select('id, task_id, content, created_by, created_at')
+      .single();
+
+    if (error || !data) {
+      console.error('Erro ao adicionar comentário:', error);
+      return;
+    }
+
+    setTaskComments((prev) => {
+      const current = prev[taskId] ?? [];
+      const nextComment: TaskComment = {
+        id: data.id,
+        taskId: data.task_id,
+        content: data.content ?? '',
+        createdBy: data.created_by,
+        createdAt: data.created_at
+      };
+      return { ...prev, [taskId]: [nextComment, ...current] };
+    });
   };
 
   const canManageWorkspaceMembers = isSuperUser
@@ -1445,6 +1777,21 @@ export function SystemScreen({
     }))
     .filter((member) => member.label);
 
+  const dashboardWorkspaceMembers = Array.from(
+    new Map(
+      [...workspaceMembers, ...dashboardMembers].map((member) => [
+        member.userId,
+        {
+          userId: member.userId,
+          fullName: member.fullName ?? null,
+          title: member.title ?? null,
+          avatarUrl: member.avatarUrl ?? null,
+          email: member.email ?? null
+        }
+      ])
+    ).values()
+  );
+
   return (
     <div className="fixed inset-0 overflow-hidden bg-[var(--page-bg)] text-[var(--text-primary)]">
       <div className="flex h-full">
@@ -1452,6 +1799,7 @@ export function SystemScreen({
           collapsed={collapsed}
           currentView={currentView}
           isSuperUser={isSuperUser}
+          isViewer={isViewer}
           canManageWorkspaces={canManageWorkspaces}
           userId={userId}
           workspaces={workspaces}
@@ -1459,6 +1807,8 @@ export function SystemScreen({
           selectedProjectId={selectedProjectId}
           onToggleCollapsed={() => setCollapsed((prev) => !prev)}
           onSelectView={(view) => {
+            if (isViewer && view !== 'dashboard') return;
+            if (view === 'settings' && !canManageWorkspaces) return;
             setCurrentView(view);
             if (view === 'settings') setSettingsTab('general');
             if (view !== 'project') setSelectedProjectId(null);
@@ -1469,6 +1819,7 @@ export function SystemScreen({
             setCurrentView('dashboard');
           }}
           onSelectProject={(workspaceId, projectId) => {
+            if (isViewer) return;
             setSelectedWorkspaceId(workspaceId);
             setSelectedProjectId(projectId);
             setCurrentView('project');
@@ -1515,6 +1866,7 @@ export function SystemScreen({
             onToggleTheme={onToggleTheme}
             onSignOut={onSignOut}
             onOpenProfile={() => {
+              if (isViewer) return;
               setCurrentView('profile');
               setSelectedProjectId(null);
             }}
@@ -1545,11 +1897,20 @@ export function SystemScreen({
                   selectedWorkspace={selectedWorkspace}
                   canManageWorkspaces={canManageWorkspaces}
                   tasks={dashboardTasks}
+                  sectors={sectorOptions}
+                  taskTypes={taskTypeOptions}
                   dashboardEvents={dashboardEvents}
                   dashboardLoading={dashboardLoading}
+                  isManager={userRole === 'manager'}
                   projectFilterId={dashboardProjectId}
                   onChangeProjectFilter={setDashboardProjectId}
-                  workspaceMembers={workspaceMembers}
+                  workspaceMembers={dashboardWorkspaceMembers}
+                  timeEntries={taskTimeEntries}
+                  dueDateChanges={taskDueDateChanges}
+                  auditLogs={taskAuditLogs}
+                  taskComments={taskComments}
+                  onLoadTaskExtras={handleLoadTaskExtras}
+                  onAddTaskComment={handleAddTaskComment}
                   onNewProject={() => {
                     setProjectName('');
                     setProjectSummary('');
@@ -1579,12 +1940,20 @@ export function SystemScreen({
                   timeEntries={taskTimeEntries}
                   dueDateChanges={taskDueDateChanges}
                   auditLogs={taskAuditLogs}
+                  taskComments={taskComments}
                   onLoadTaskExtras={(taskId) => {
                     handleLoadTaskExtras(taskId);
                   }}
+                  onAddTaskComment={handleAddTaskComment}
                   onAddTask={(task) => {
                     if (!selectedProjectId) return;
                     handleAddTask(selectedProjectId, task);
+                  }}
+                  onAddTasksBulk={async (tasksBatch) => {
+                    if (!selectedProjectId) {
+                      return { created: 0, failed: tasksBatch.length, message: 'Selecione um projeto.' };
+                    }
+                    return handleAddTasksBulk(selectedProjectId, tasksBatch);
                   }}
                   onUpdateTask={(taskId, updates) => {
                     if (!selectedProjectId) return;
@@ -1674,8 +2043,16 @@ export function SystemScreen({
                               className="flex-1 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm"
                               placeholder="Novo setor (ex: Fiscal)"
                             />
+                            <input
+                              type="color"
+                              value={newSectorColor}
+                              onChange={(event) => setNewSectorColor(event.target.value)}
+                              className="h-10 w-12 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] p-1"
+                              title="Cor do setor"
+                            />
                             <button
                               onClick={handleAddSector}
+                              disabled={!canManageWorkspaces}
                               className="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white"
                             >
                               Adicionar
@@ -1684,12 +2061,27 @@ export function SystemScreen({
                           <div className="flex flex-wrap gap-2">
                             {sectorOptions.map((sector) => (
                               <div
-                                key={sector}
+                                key={sector.name}
                                 className="group inline-flex items-center gap-2 rounded-full border border-[var(--panel-border)] bg-[var(--panel-bg-soft)] px-3 py-1 text-sm"
                               >
-                                <span>{sector}</span>
+                                <input
+                                  type="color"
+                                  value={sector.color}
+                                  onChange={(event) =>
+                                    handleUpdateSectorColor(sector.name, event.target.value)
+                                  }
+                                  disabled={!canManageWorkspaces}
+                                  className="h-5 w-5 cursor-pointer rounded border border-[var(--input-border)] bg-transparent p-0"
+                                  title={`Alterar cor do setor ${sector.name}`}
+                                />
+                                <span
+                                  className="h-2.5 w-2.5 rounded-full"
+                                  style={{ backgroundColor: sector.color }}
+                                />
+                                <span>{sector.name}</span>
                                 <button
-                                  onClick={() => handleRemoveSector(sector)}
+                                  onClick={() => handleRemoveSector(sector.name)}
+                                  disabled={!canManageWorkspaces}
                                   className="text-xs text-[var(--text-muted)] group-hover:text-rose-500"
                                   title="Remover"
                                 >
@@ -1721,8 +2113,16 @@ export function SystemScreen({
                               className="flex-1 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm"
                               placeholder="Novo tipo (ex: Revisao)"
                             />
+                            <input
+                              type="color"
+                              value={newTaskTypeColor}
+                              onChange={(event) => setNewTaskTypeColor(event.target.value)}
+                              className="h-10 w-12 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] p-1"
+                              title="Cor do tipo"
+                            />
                             <button
                               onClick={handleAddTaskType}
+                              disabled={!canManageWorkspaces}
                               className="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white"
                             >
                               Adicionar
@@ -1731,12 +2131,27 @@ export function SystemScreen({
                           <div className="flex flex-wrap gap-2">
                             {taskTypeOptions.map((type) => (
                               <div
-                                key={type}
+                                key={type.name}
                                 className="group inline-flex items-center gap-2 rounded-full border border-[var(--panel-border)] bg-[var(--panel-bg-soft)] px-3 py-1 text-sm"
                               >
-                                <span>{type}</span>
+                                <input
+                                  type="color"
+                                  value={type.color}
+                                  onChange={(event) =>
+                                    handleUpdateTaskTypeColor(type.name, event.target.value)
+                                  }
+                                  disabled={!canManageWorkspaces}
+                                  className="h-5 w-5 cursor-pointer rounded border border-[var(--input-border)] bg-transparent p-0"
+                                  title={`Alterar cor do tipo ${type.name}`}
+                                />
+                                <span
+                                  className="h-2.5 w-2.5 rounded-full"
+                                  style={{ backgroundColor: type.color }}
+                                />
+                                <span>{type.name}</span>
                                 <button
-                                  onClick={() => handleRemoveTaskType(type)}
+                                  onClick={() => handleRemoveTaskType(type.name)}
+                                  disabled={!canManageWorkspaces}
                                   className="text-xs text-[var(--text-muted)] group-hover:text-rose-500"
                                   title="Remover"
                                 >
