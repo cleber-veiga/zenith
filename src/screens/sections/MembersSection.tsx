@@ -11,6 +11,7 @@ type MemberItem = {
   phone?: string | null;
   email?: string | null;
   validated?: boolean;
+  lastSeen?: string | null;
 };
 
 type InviteRow = {
@@ -74,6 +75,22 @@ export function MembersSection({
   onChangeMemberRole,
   onRemoveMember
 }: MembersSectionProps) {
+  const onlineThresholdMs = 2 * 60 * 1000;
+  const formatPresence = (lastSeen?: string | null) => {
+    if (!lastSeen) return { online: false, label: 'Sem atividade recente' };
+    const seenAt = new Date(lastSeen);
+    if (Number.isNaN(seenAt.getTime())) return { online: false, label: 'Sem atividade recente' };
+    const now = Date.now();
+    const diffMs = now - seenAt.getTime();
+    if (diffMs <= onlineThresholdMs) {
+      return { online: true, label: 'Online agora' };
+    }
+    return {
+      online: false,
+      label: `Visto por último em ${seenAt.toLocaleString('pt-BR')}`
+    };
+  };
+
   const selectedWorkspace =
     workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
 
@@ -286,7 +303,8 @@ export function MembersSection({
             <thead className="bg-[var(--card-bg)] text-xs uppercase tracking-wider text-[var(--text-muted)]">
               <tr>
                 <th className="px-6 py-3 font-medium">Membro</th>
-                <th className="px-6 py-3 font-medium">Status</th>
+                <th className="px-6 py-3 font-medium">Conta</th>
+                <th className="px-6 py-3 font-medium">Presença</th>
                 <th className="px-6 py-3 font-medium">Função</th>
                 <th className="px-6 py-3 font-medium">Acesso</th>
                 <th className="px-6 py-3 font-medium text-right">Ações</th>
@@ -296,7 +314,7 @@ export function MembersSection({
               {membersLoading ? (
                 <tr>
                   <td
-                    colSpan={5}
+                    colSpan={6}
                     className="px-6 py-8 text-center text-[var(--text-secondary)]"
                   >
                     Carregando membros...
@@ -304,6 +322,7 @@ export function MembersSection({
                 </tr>
               ) : rows.length ? (
                 rows.map((member) => {
+                  const presence = formatPresence(member.lastSeen);
                   const accessLabel =
                     member.access === 'workspace'
                       ? 'Workspace'
@@ -343,6 +362,18 @@ export function MembersSection({
                              Pendente
                            </span>
                         )}
+                      </td>
+                      <td className="px-6 py-4">
+                        <span
+                          className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium border ${
+                            presence.online
+                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                              : 'bg-slate-500/10 text-slate-300 border-slate-500/20'
+                          }`}
+                          title={presence.label}
+                        >
+                          {presence.label}
+                        </span>
                       </td>
                       <td className="px-6 py-4">
                         <CustomSelect
@@ -389,7 +420,7 @@ export function MembersSection({
               ) : (
                 <tr>
                   <td
-                    colSpan={5}
+                    colSpan={6}
                     className="px-6 py-8 text-center text-sm text-[var(--text-secondary)]"
                   >
                     Nenhum membro encontrado.

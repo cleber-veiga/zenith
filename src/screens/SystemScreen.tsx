@@ -96,6 +96,7 @@ export function SystemScreen({
       phone?: string | null;
       email?: string | null;
       validated?: boolean;
+      lastSeen?: string | null;
     }>
   >([]);
   const [dashboardMembers, setDashboardMembers] = useState<
@@ -117,6 +118,7 @@ export function SystemScreen({
       phone?: string | null;
       email?: string | null;
       validated?: boolean;
+      lastSeen?: string | null;
     }>
   >([]);
   const [profileForm, setProfileForm] = useState({
@@ -1007,11 +1009,19 @@ export function SystemScreen({
           .eq('project_id', selectedProjectId)
       : { data: [], error: null };
 
+    const presenceResponse = await supabase
+      .from('workspace_user_presence')
+      .select('user_id, last_seen')
+      .eq('workspace_id', selectedWorkspaceId);
+
     if (workspaceResponse.error || projectResponse.error) {
       console.error(workspaceResponse.error || projectResponse.error);
       setMembersError('Não foi possível carregar os membros.');
       setMembersLoading(false);
       return;
+    }
+    if (presenceResponse.error) {
+      console.error('Erro ao carregar presença:', presenceResponse.error);
     }
 
     const workspaceRows = workspaceResponse.data ?? [];
@@ -1031,6 +1041,9 @@ export function SystemScreen({
         password_set?: boolean | null;
       }
     >();
+    const presenceMap = new Map<string, string | null>(
+      (presenceResponse.data ?? []).map((row) => [row.user_id, row.last_seen ?? null])
+    );
     if (userIds.length) {
       const { data: profiles, error: profilesError } = await supabase.rpc('get_profiles_with_email', {
         user_ids: userIds
@@ -1066,7 +1079,8 @@ export function SystemScreen({
           avatarUrl: profileData?.avatar_url ?? null,
           phone: profileData?.phone ?? null,
           email: profileData?.email ?? null,
-          validated: Boolean(profileData?.password_set)
+          validated: Boolean(profileData?.password_set),
+          lastSeen: presenceMap.get(row.user_id) ?? null
         };
       })
     );
@@ -1082,7 +1096,8 @@ export function SystemScreen({
           avatarUrl: profileData?.avatar_url ?? null,
           phone: profileData?.phone ?? null,
           email: profileData?.email ?? null,
-          validated: Boolean(profileData?.password_set)
+          validated: Boolean(profileData?.password_set),
+          lastSeen: presenceMap.get(row.user_id) ?? null
         };
       })
     );
@@ -1099,6 +1114,43 @@ export function SystemScreen({
       setSelectedProjectId(null);
     }
   }, [isViewer, currentView, selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceId) return;
+
+    const sendPresence = async () => {
+      const { error } = await supabase.from('workspace_user_presence').upsert(
+        {
+          workspace_id: selectedWorkspaceId,
+          user_id: userId,
+          last_seen: new Date().toISOString()
+        },
+        { onConflict: 'workspace_id,user_id' }
+      );
+      if (error) {
+        console.error('Erro ao atualizar presença:', error);
+      }
+    };
+
+    void sendPresence();
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void sendPresence();
+      }
+    }, 60000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void sendPresence();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [selectedWorkspaceId, userId]);
 
   useEffect(() => {
     const shouldLoadMembers =
