@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
-import type { Session } from '@supabase/supabase-js';
+import { useEffect, useRef, useState } from 'react';
+import type { RealtimeChannel, Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import type {
+  ProjectExtraWorkEntry,
   Project,
   ProjectTask,
   SystemView,
@@ -135,6 +136,9 @@ export function SystemScreen({
   const [avatarUploading, setAvatarUploading] = useState(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [projectTaskState, setProjectTaskState] = useState<Record<string, ProjectTask[]>>({});
+  const [projectExtraWorkEntries, setProjectExtraWorkEntries] = useState<
+    Record<string, ProjectExtraWorkEntry[]>
+  >({});
   const [taskTimeEntries, setTaskTimeEntries] = useState<Record<string, TaskTimeEntry[]>>({});
   const [taskDueDateChanges, setTaskDueDateChanges] = useState<Record<string, TaskDueDateChange[]>>(
     {}
@@ -161,6 +165,8 @@ export function SystemScreen({
   >([]);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'general' | 'members'>('general');
+  const [onlineWorkspaceUserIds, setOnlineWorkspaceUserIds] = useState<string[]>([]);
+  const presenceChannelRef = useRef<RealtimeChannel | null>(null);
 
   const canManageWorkspaces = isSuperUser || userRole === 'manager';
   const isViewer = userRole === 'viewer';
@@ -180,6 +186,9 @@ export function SystemScreen({
       .flatMap((workspace) => workspace.projects)
       .find((project) => project.id === selectedProjectId) ?? null;
   const activeProjectTasks = selectedProjectId ? projectTaskState[selectedProjectId] ?? [] : [];
+  const activeProjectExtraWorkEntries = selectedProjectId
+    ? projectExtraWorkEntries[selectedProjectId] ?? []
+    : [];
 
   const loadWorkspaces = async () => {
     setLoadingWorkspaces(true);
@@ -356,6 +365,34 @@ export function SystemScreen({
     setProjectTaskState((prev) => ({
       ...prev,
       [projectId]: mappedTasks
+    }));
+  };
+
+  const loadProjectExtraWorkEntries = async (projectId: string) => {
+    const { data, error } = await supabase
+      .from('project_extra_work_entries')
+      .select('id, project_id, description, duration_minutes, worked_at, note, created_by, created_at')
+      .eq('project_id', projectId)
+      .order('worked_at', { ascending: false })
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Erro ao carregar trabalhos extras:', error);
+      return;
+    }
+
+    setProjectExtraWorkEntries((prev) => ({
+      ...prev,
+      [projectId]: (data ?? []).map((row) => ({
+        id: row.id,
+        projectId: row.project_id,
+        description: row.description ?? '',
+        durationMinutes: row.duration_minutes ?? 0,
+        workedAt: row.worked_at ?? '',
+        note: row.note,
+        createdBy: row.created_by,
+        createdAt: row.created_at
+      }))
     }));
   };
 
@@ -567,7 +604,10 @@ export function SystemScreen({
 
   useEffect(() => {
     if (!selectedProjectId) return;
-    void loadProjectTasks(selectedProjectId);
+    void Promise.all([
+      loadProjectTasks(selectedProjectId),
+      loadProjectExtraWorkEntries(selectedProjectId)
+    ]);
   }, [selectedProjectId]);
 
   const loadSectorAndTypes = async (workspaceId: string) => {
@@ -1116,41 +1156,132 @@ export function SystemScreen({
   }, [isViewer, currentView, selectedProjectId]);
 
   useEffect(() => {
-    if (!selectedWorkspaceId) return;
+    if (!selectedWorkspaceId) {
+      setOnlineWorkspaceUserIds([]);
+      return;
+    }
 
-    const sendPresence = async () => {
+    const channel = supabase.channel(`workspace-presence:${selectedWorkspaceId}`, {
+      config: {
+        presence: { key: userId }
+      }
+    });
+    presenceChannelRef.current = channel;
+
+    const syncPresence = () => {
+      const state = channel.presenceState();
+      setOnlineWorkspaceUserIds(Object.keys(state));
+    };
+
+    channel.on('presence', { event: 'sync' }, syncPresence);
+    channel.on('presence', { event: 'join' }, syncPresence);
+    channel.on('presence', { event: 'leave' }, syncPresence);
+
+    channel.subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        await channel.track({
+          user_id: userId,
+          workspace_id: selectedWorkspaceId,
+          online_at: new Date().toISOString()
+        });
+      }
+    });
+
+    return () => {
+      void (async () => {
+        try {
+          await channel.untrack();
+        } catch (error) {
+          console.error('Erro ao remover presença realtime:', error);
+        }
+        supabase.removeChannel(channel);
+        if (presenceChannelRef.current === channel) {
+          presenceChannelRef.current = null;
+        }
+      })();
+      setOnlineWorkspaceUserIds([]);
+    };
+  }, [selectedWorkspaceId, userId]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceId) return;
+    const workspaceId = selectedWorkspaceId;
+
+    const markOnline = async () => {
       const { error } = await supabase.from('workspace_user_presence').upsert(
         {
-          workspace_id: selectedWorkspaceId,
+          workspace_id: workspaceId,
           user_id: userId,
           last_seen: new Date().toISOString()
         },
         { onConflict: 'workspace_id,user_id' }
       );
       if (error) {
-        console.error('Erro ao atualizar presença:', error);
+        console.error('Erro ao atualizar presença (online):', error);
       }
     };
 
-    void sendPresence();
+    const markOffline = async () => {
+      const offlineDate = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      const { error } = await supabase.from('workspace_user_presence').upsert(
+        {
+          workspace_id: workspaceId,
+          user_id: userId,
+          last_seen: offlineDate
+        },
+        { onConflict: 'workspace_id,user_id' }
+      );
+      if (error) {
+        console.error('Erro ao atualizar presença (offline):', error);
+      }
+    };
+
+    void markOnline();
     const intervalId = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
-        void sendPresence();
+        void markOnline();
       }
     }, 60000);
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        void sendPresence();
+        if (presenceChannelRef.current) {
+          void presenceChannelRef.current.track({
+            user_id: userId,
+            workspace_id: workspaceId,
+            online_at: new Date().toISOString()
+          });
+        }
+        void markOnline();
+      } else {
+        if (presenceChannelRef.current) {
+          void presenceChannelRef.current.untrack();
+        }
+        void markOffline();
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
+    const handleBeforeUnload = () => {
+      void markOffline();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
+      void markOffline();
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
   }, [selectedWorkspaceId, userId]);
+
+  useEffect(() => {
+    const shouldPollMembers = currentView === 'settings' && settingsTab === 'members' && !!selectedWorkspaceId;
+    if (!shouldPollMembers) return;
+    const intervalId = window.setInterval(() => {
+      void loadMembers();
+    }, 30000);
+    return () => window.clearInterval(intervalId);
+  }, [currentView, settingsTab, selectedWorkspaceId, selectedProjectId]);
 
   useEffect(() => {
     const shouldLoadMembers =
@@ -1644,6 +1775,44 @@ export function SystemScreen({
     });
   };
 
+  const handleAddProjectExtraWorkEntry = async (
+    projectId: string,
+    entry: Omit<ProjectExtraWorkEntry, 'id' | 'projectId' | 'createdBy' | 'createdAt'>
+  ) => {
+    const { data, error } = await supabase
+      .from('project_extra_work_entries')
+      .insert({
+        project_id: projectId,
+        description: entry.description.trim(),
+        duration_minutes: entry.durationMinutes,
+        worked_at: entry.workedAt,
+        note: entry.note?.trim() || null,
+        created_by: userId
+      })
+      .select('id, project_id, description, duration_minutes, worked_at, note, created_by, created_at')
+      .single();
+
+    if (error || !data) {
+      console.error('Erro ao registrar trabalho extra:', error);
+      return;
+    }
+
+    setProjectExtraWorkEntries((prev) => {
+      const current = prev[projectId] ?? [];
+      const nextEntry: ProjectExtraWorkEntry = {
+        id: data.id,
+        projectId: data.project_id,
+        description: data.description ?? '',
+        durationMinutes: data.duration_minutes ?? 0,
+        workedAt: data.worked_at ?? '',
+        note: data.note,
+        createdBy: data.created_by,
+        createdAt: data.created_at
+      };
+      return { ...prev, [projectId]: [nextEntry, ...current] };
+    });
+  };
+
   const canManageWorkspaceMembers = isSuperUser
     ? true
     : Boolean(memberWorkspaces.find((workspace) => workspace.id === selectedWorkspaceId));
@@ -1779,6 +1948,28 @@ export function SystemScreen({
 
     setPasswordMessage('Senha atualizada com sucesso.');
     setPasswordSaving(false);
+  };
+
+  const handleUserSignOut = async () => {
+    if (presenceChannelRef.current) {
+      try {
+        await presenceChannelRef.current.untrack();
+      } catch (error) {
+        console.error('Erro ao remover presença realtime no logout:', error);
+      }
+    }
+    if (selectedWorkspaceId) {
+      const offlineDate = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      await supabase.from('workspace_user_presence').upsert(
+        {
+          workspace_id: selectedWorkspaceId,
+          user_id: userId,
+          last_seen: offlineDate
+        },
+        { onConflict: 'workspace_id,user_id' }
+      );
+    }
+    await Promise.resolve(onSignOut());
   };
 
   const handleAvatarUpload = async (file: File) => {
@@ -1948,7 +2139,7 @@ export function SystemScreen({
             workspaceName={selectedWorkspace?.name}
             projectName={selectedProject?.name}
             onToggleTheme={onToggleTheme}
-            onSignOut={onSignOut}
+            onSignOut={handleUserSignOut}
             onOpenProfile={() => {
               if (isViewer) return;
               setCurrentView('profile');
@@ -2008,6 +2199,7 @@ export function SystemScreen({
                 <ProjectSection
                   project={selectedProject}
                   tasks={activeProjectTasks}
+                  extraWorkEntries={activeProjectExtraWorkEntries}
                   members={Array.from(
                     new Map(
                       [...workspaceMembers, ...projectMembers].map((m) => [m.userId, m])
@@ -2055,6 +2247,10 @@ export function SystemScreen({
                     if (!selectedProjectId) return;
                     handleAddDueDateChange(selectedProjectId, taskId, newDate, reason);
                   }}
+                  onAddExtraWorkEntry={(entry) => {
+                    if (!selectedProjectId) return;
+                    handleAddProjectExtraWorkEntry(selectedProjectId, entry);
+                  }}
                 />
               )}
               {currentView === 'profile' && (
@@ -2081,7 +2277,7 @@ export function SystemScreen({
                   onUploadAvatar={handleAvatarUpload}
                   onSave={handleProfileSave}
                   onChangePassword={handlePasswordChange}
-                  onSignOut={onSignOut}
+                  onSignOut={handleUserSignOut}
                 />
               )}
               {currentView === 'settings' && (
@@ -2264,6 +2460,7 @@ export function SystemScreen({
                       selectedProjectId={selectedProjectId}
                       workspaceMembers={workspaceMembers}
                       projectMembers={projectMembers}
+                      onlineUserIds={onlineWorkspaceUserIds}
                       membersLoading={membersLoading}
                       membersError={membersError}
                       canManageWorkspaceMembers={canManageWorkspaceMembers}

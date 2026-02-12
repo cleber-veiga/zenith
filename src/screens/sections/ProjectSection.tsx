@@ -36,6 +36,7 @@ import {
 } from 'date-fns';
 import type {
   Project,
+  ProjectExtraWorkEntry,
   ProjectTask,
   TaskAuditLog,
   TaskComment,
@@ -58,6 +59,7 @@ type MemberOption = {
 type ProjectSectionProps = {
   project: Project | null;
   tasks: ProjectTask[];
+  extraWorkEntries: ProjectExtraWorkEntry[];
   members: MemberOption[];
   sectors: WorkspaceTagOption[];
   taskTypes: WorkspaceTagOption[];
@@ -79,6 +81,9 @@ type ProjectSectionProps = {
   ) => void;
   onAddDueDateChange: (taskId: string, newDate: string, reason: string) => void;
   onAddTaskComment: (taskId: string, content: string) => Promise<void> | void;
+  onAddExtraWorkEntry: (
+    entry: Omit<ProjectExtraWorkEntry, 'id' | 'projectId' | 'createdBy' | 'createdAt'>
+  ) => void;
 };
 
 type TaskFilters = {
@@ -192,6 +197,13 @@ const formatStopwatch = (ms: number) => {
 };
 
 const toIsoDate = (value: string) => value;
+const getTodayIsoDate = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = `${now.getMonth() + 1}`.padStart(2, '0');
+  const day = `${now.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 const normalizeDateValue = (value: string) => {
   if (!value) return '';
@@ -324,6 +336,7 @@ function MultiSelect({
 export function ProjectSection({
   project,
   tasks,
+  extraWorkEntries,
   members,
   sectors,
   taskTypes,
@@ -339,9 +352,10 @@ export function ProjectSection({
   onDeleteTask,
   onAddTimeEntry,
   onAddDueDateChange,
-  onAddTaskComment
+  onAddTaskComment,
+  onAddExtraWorkEntry
 }: ProjectSectionProps) {
-  const [viewMode, setViewMode] = useState<'list' | 'board' | 'calendar'>('list');
+  const [viewMode, setViewMode] = useState<'list' | 'board' | 'calendar' | 'extras'>('list');
   const [collapsedGroups, setCollapsedGroups] = useState<Record<TaskStatus, boolean>>(
     () =>
       statusOptions.reduce<Record<TaskStatus, boolean>>((acc, status) => {
@@ -365,6 +379,10 @@ export function ProjectSection({
   const [newDueDate, setNewDueDate] = useState('');
   const [dueDateReason, setDueDateReason] = useState('');
   const [commentDraft, setCommentDraft] = useState('');
+  const [extraDescription, setExtraDescription] = useState('');
+  const [extraMinutes, setExtraMinutes] = useState(0);
+  const [extraWorkedAt, setExtraWorkedAt] = useState(getTodayIsoDate());
+  const [extraNote, setExtraNote] = useState('');
   const [bulkImporting, setBulkImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -1083,6 +1101,21 @@ export function ProjectSection({
     setDueDateReason('');
   };
 
+  const handleAddExtraWork = () => {
+    const description = extraDescription.trim();
+    if (!description || extraMinutes <= 0 || !extraWorkedAt) return;
+    onAddExtraWorkEntry({
+      description,
+      durationMinutes: extraMinutes,
+      workedAt: extraWorkedAt,
+      note: extraNote.trim() || null
+    });
+    setExtraDescription('');
+    setExtraMinutes(0);
+    setExtraNote('');
+    setExtraWorkedAt(getTodayIsoDate());
+  };
+
   return (
     <div className="flex flex-col h-full min-w-0 font-sans relative">
       <div className="flex flex-col h-full min-w-0 bg-[var(--panel-bg)]">
@@ -1109,8 +1142,16 @@ export function ProjectSection({
               <Calendar size={16} />
               Calendar
             </button>
+            <button
+              onClick={() => setViewMode('extras')}
+              className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition border-b-2 ${viewMode === 'extras' ? 'text-[var(--accent)] border-[var(--accent)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--muted-bg)] border-transparent'}`}
+            >
+              <Clock size={16} />
+              Extras
+            </button>
           </div>
 
+          {viewMode !== 'extras' && (
           <>
             {viewMode === 'list' && (
               <div className="px-6 py-2 flex items-center gap-4 border-b border-[var(--panel-border)]">
@@ -1608,6 +1649,96 @@ export function ProjectSection({
               </div>
             )}
           </>
+          )}
+
+          {viewMode === 'extras' && (
+            <div className="flex-1 overflow-y-auto p-6">
+              <div className="rounded-2xl border border-[var(--panel-border)] bg-[var(--panel-bg-soft)] p-6 space-y-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-[var(--text-primary)]">
+                      Trabalhos extras
+                    </div>
+                    <div className="text-xs text-[var(--text-muted)]">
+                      Registre atividades executadas fora do planejamento original.
+                    </div>
+                  </div>
+                  <div className="text-xs text-[var(--text-secondary)]">
+                    Total acumulado: {formatMinutes(extraWorkEntries.reduce((acc, entry) => acc + entry.durationMinutes, 0))}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-4 space-y-3">
+                  <div className="text-xs font-semibold text-[var(--text-secondary)]">Novo lançamento</div>
+                  <div className="grid grid-cols-1 gap-2 lg:grid-cols-[2fr_120px_180px_1.5fr_auto]">
+                    <input
+                      value={extraDescription}
+                      onChange={(event) => setExtraDescription(event.target.value)}
+                      className="rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2.5 py-2 text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                      placeholder="Descreva o trabalho extra executado"
+                    />
+                    <input
+                      type="number"
+                      min={1}
+                      value={extraMinutes}
+                      onChange={(event) => setExtraMinutes(Number(event.target.value || 0))}
+                      className="rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2.5 py-2 text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                      placeholder="Minutos"
+                    />
+                    <SingleDatePicker
+                      value={extraWorkedAt}
+                      onChange={setExtraWorkedAt}
+                      className="w-full"
+                      inputClassName="w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2.5 py-2 text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent)] placeholder:text-[var(--text-muted)]"
+                    />
+                    <input
+                      value={extraNote}
+                      onChange={(event) => setExtraNote(event.target.value)}
+                      className="rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2.5 py-2 text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                      placeholder="Observação (opcional)"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddExtraWork}
+                      disabled={!extraDescription.trim() || extraMinutes <= 0 || !extraWorkedAt}
+                      className="rounded-md bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                    >
+                      Registrar
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-xs font-semibold text-[var(--text-secondary)]">Histórico</div>
+                  <div className="space-y-2">
+                    {extraWorkEntries.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="grid grid-cols-1 gap-1 rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2 text-xs lg:grid-cols-[1fr_auto_auto]"
+                      >
+                        <div className="text-[var(--text-primary)]">
+                          <span className="font-medium">{entry.description}</span>
+                          {entry.note ? <span className="text-[var(--text-muted)]"> • {entry.note}</span> : null}
+                        </div>
+                        <div className="text-[var(--text-secondary)]">
+                          {formatDate(entry.workedAt)} • {formatMinutes(entry.durationMinutes)}
+                        </div>
+                        <div className="text-[var(--text-muted)]">
+                          {memberLabelById.get(entry.createdBy) ??
+                            (entry.createdBy === currentUserId ? 'Você' : entry.createdBy)}
+                        </div>
+                      </div>
+                    ))}
+                    {!extraWorkEntries.length && (
+                      <div className="rounded-lg border border-dashed border-[var(--panel-border)] px-3 py-4 text-xs text-[var(--text-muted)]">
+                        Sem lançamentos de trabalho extra neste projeto.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {viewMode === 'board' && (
             <DragDropContext onDragEnd={onDragEnd}>
@@ -2353,6 +2484,9 @@ export function ProjectSection({
                             <div className="text-[var(--text-muted)]">
                               {formatDate(entry.startedAt)} - {formatDate(entry.endedAt)}
                             </div>
+                            <div className="text-[var(--text-muted)]">
+                              {memberLabelById.get(entry.createdBy) ?? entry.createdBy}
+                            </div>
                           </div>
                           <div className="text-[var(--text-muted)]">{entry.note || '-'}</div>
                         </div>
@@ -2412,6 +2546,10 @@ export function ProjectSection({
                             {formatDate(change.previousDate)} → {formatDate(change.newDate)}
                           </div>
                           <div className="text-[var(--text-muted)]">{change.reason}</div>
+                          <div className="text-[var(--text-muted)]">
+                            {memberLabelById.get(change.changedBy) ?? change.changedBy} •{' '}
+                            {new Date(change.createdAt).toLocaleString('pt-BR')}
+                          </div>
                         </div>
                       ))}
                       {(dueDateChanges[selectedTask.id] ?? []).length === 0 && (
@@ -2436,6 +2574,10 @@ export function ProjectSection({
                           <div className="text-[var(--text-muted)]">
                             {formatAuditValue(log.field, log.oldValue)} →{' '}
                             {formatAuditValue(log.field, log.newValue)}
+                          </div>
+                          <div className="text-[var(--text-muted)]">
+                            {memberLabelById.get(log.changedBy) ?? log.changedBy} •{' '}
+                            {new Date(log.createdAt).toLocaleString('pt-BR')}
                           </div>
                         </div>
                       ))}

@@ -95,6 +95,16 @@ const normalizeDateValue = (value: string) => {
   return date.toISOString().slice(0, 10);
 };
 
+const getRelativeIsoDate = (daysFromToday: number) => {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + daysFromToday);
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 const formatDatePtBr = (value: string) => {
   if (!value) return '-';
   const date = new Date(value);
@@ -471,6 +481,52 @@ export function DashboardSection({
       .map(([value, label]) => ({ value, label }))
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [tasks, memberMap]);
+
+  const taskHighlights = useMemo(() => {
+    const todayIso = getRelativeIsoDate(0);
+    const yesterdayIso = getRelativeIsoDate(-1);
+    const tomorrowIso = getRelativeIsoDate(1);
+
+    const finishedYesterdayIds = new Set(
+      dashboardEvents
+        .filter((event) => {
+          if (event.type !== 'audit') return false;
+          if (normalizeDateValue(event.createdAt) !== yesterdayIso) return false;
+          const summary = event.summary.toLowerCase();
+          return summary.includes('status da tarefa') && summary.includes('concluída');
+        })
+        .map((event) => event.taskId)
+    );
+
+    const buildItems = (list: ProjectTask[]) =>
+      list
+        .map((task) => ({
+          id: task.id,
+          description: task.description || task.name || 'Sem descrição',
+          projectLabel: task.projectId ? (projectNameById.get(task.projectId) ?? 'Projeto') : 'Projeto'
+        }))
+        .sort((a, b) => a.projectLabel.localeCompare(b.projectLabel));
+
+    const finishedYesterday = buildItems(tasks.filter((task) => finishedYesterdayIds.has(task.id)));
+
+    const dueToday = buildItems(
+      tasks.filter((task) => {
+        if (task.status === 'Concluída' || task.status === 'Cancelada') return false;
+        const dueDateValue = normalizeDateValue(task.dueDateCurrent || task.dueDateOriginal || '');
+        return dueDateValue === todayIso;
+      })
+    );
+
+    const dueTomorrow = buildItems(
+      tasks.filter((task) => {
+        if (task.status === 'Concluída' || task.status === 'Cancelada') return false;
+        const dueDateValue = normalizeDateValue(task.dueDateCurrent || task.dueDateOriginal || '');
+        return dueDateValue === tomorrowIso;
+      })
+    );
+
+    return { finishedYesterday, dueToday, dueTomorrow };
+  }, [dashboardEvents, projectNameById, tasks]);
 
   const taskGridRows = useMemo(() => {
     const normalizeText = (value: string) => value.trim().toLowerCase();
@@ -1015,6 +1071,76 @@ export function DashboardSection({
                   {!userCounts.length && (
                     <div className="text-xs text-[var(--text-muted)]">
                       Sem distribuicao por executor.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Finalizadas ontem
+                </h3>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">
+                  {taskHighlights.finishedYesterday.length} tarefa(s)
+                </p>
+                <div className="mt-3 space-y-2">
+                  {taskHighlights.finishedYesterday.slice(0, 6).map((task) => (
+                    <div key={task.id} className="rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2">
+                      <div className="text-xs font-medium text-[var(--text-primary)] line-clamp-2">
+                        {task.description}
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-[var(--text-muted)]">{task.projectLabel}</div>
+                    </div>
+                  ))}
+                  {!taskHighlights.finishedYesterday.length && (
+                    <div className="text-xs text-[var(--text-muted)]">Nenhuma tarefa finalizada ontem.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Vencem hoje
+                </h3>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">
+                  {taskHighlights.dueToday.length} tarefa(s)
+                </p>
+                <div className="mt-3 space-y-2">
+                  {taskHighlights.dueToday.slice(0, 6).map((task) => (
+                    <div key={task.id} className="rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2">
+                      <div className="text-xs font-medium text-[var(--text-primary)] line-clamp-2">
+                        {task.description}
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-[var(--text-muted)]">{task.projectLabel}</div>
+                    </div>
+                  ))}
+                  {!taskHighlights.dueToday.length && (
+                    <div className="text-xs text-[var(--text-muted)]">Nenhuma tarefa vencendo hoje.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Programadas para amanhã
+                </h3>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">
+                  {taskHighlights.dueTomorrow.length} tarefa(s)
+                </p>
+                <div className="mt-3 space-y-2">
+                  {taskHighlights.dueTomorrow.slice(0, 6).map((task) => (
+                    <div key={task.id} className="rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2">
+                      <div className="text-xs font-medium text-[var(--text-primary)] line-clamp-2">
+                        {task.description}
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-[var(--text-muted)]">{task.projectLabel}</div>
+                    </div>
+                  ))}
+                  {!taskHighlights.dueTomorrow.length && (
+                    <div className="text-xs text-[var(--text-muted)]">
+                      Nenhuma tarefa programada para amanhã.
                     </div>
                   )}
                 </div>

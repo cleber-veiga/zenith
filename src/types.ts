@@ -115,3 +115,14 @@ export type TaskComment = {
   createdBy: string;
   createdAt: string;
 };
+
+export type ProjectExtraWorkEntry = {
+  id: string;
+  projectId: string;
+  description: string;
+  durationMinutes: number;
+  workedAt: string;
+  note?: string | null;
+  createdBy: string;
+  createdAt: string;
+};

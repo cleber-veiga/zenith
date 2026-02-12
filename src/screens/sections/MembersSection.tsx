@@ -28,6 +28,7 @@ type MembersSectionProps = {
   selectedProjectId: string | null;
   workspaceMembers: MemberItem[];
   projectMembers: MemberItem[];
+  onlineUserIds: string[];
   membersLoading: boolean;
   membersError: string | null;
   canManageWorkspaceMembers: boolean;
@@ -57,6 +58,7 @@ export function MembersSection({
   selectedProjectId,
   workspaceMembers,
   projectMembers,
+  onlineUserIds,
   membersLoading,
   membersError,
   canManageWorkspaceMembers,
@@ -76,7 +78,11 @@ export function MembersSection({
   onRemoveMember
 }: MembersSectionProps) {
   const onlineThresholdMs = 2 * 60 * 1000;
-  const formatPresence = (lastSeen?: string | null) => {
+  const onlineSet = new Set(onlineUserIds);
+  const formatPresence = (userId: string, lastSeen?: string | null) => {
+    if (onlineSet.has(userId)) {
+      return { online: true, label: 'Online agora' };
+    }
     if (!lastSeen) return { online: false, label: 'Sem atividade recente' };
     const seenAt = new Date(lastSeen);
     if (Number.isNaN(seenAt.getTime())) return { online: false, label: 'Sem atividade recente' };
@@ -322,7 +328,7 @@ export function MembersSection({
                 </tr>
               ) : rows.length ? (
                 rows.map((member) => {
-                  const presence = formatPresence(member.lastSeen);
+                  const presence = formatPresence(member.userId, member.lastSeen);
                   const accessLabel =
                     member.access === 'workspace'
                       ? 'Workspace'
