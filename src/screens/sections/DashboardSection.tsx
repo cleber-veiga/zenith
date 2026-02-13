@@ -13,6 +13,7 @@ import type {
   TaskStatus,
   TaskTimeEntry,
   Workspace,
+  WorkspaceFeedPost,
   WorkspaceTagOption
 } from '../../types';
 import { supabase } from '../../lib/supabase';
@@ -57,7 +58,7 @@ const STATUS_COLORS: Record<TaskStatus, string> = {
 const PRIORITY_OPTIONS: TaskPriority[] = ['Baixa', 'Média', 'Alta', 'Crítica'];
 const weekDayNames = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'] as const;
 
-type DashboardTab = 'dashboard' | 'tasks';
+type DashboardTab = 'dashboard' | 'tasks' | 'feed';
 type TaskSituation = 'No Prazo' | 'Finalizada' | 'Atrasada';
 type TaskViewMode = 'list' | 'board' | 'calendar';
 type CalendarViewMode = 'month' | 'week' | 'day';
@@ -271,11 +272,14 @@ type DashboardSectionProps = {
     taskId: string;
     createdAt: string;
     userId: string;
-    type: 'audit' | 'time' | 'due';
+    type: 'audit' | 'time' | 'due' | 'comment' | 'extra';
     summary: string;
   }>;
+  dashboardFeedPosts: WorkspaceFeedPost[];
   dashboardLoading: boolean;
   isManager: boolean;
+  canPostFeed: boolean;
+  currentUserId: string;
   projectFilterId: string;
   onChangeProjectFilter: (projectId: string) => void;
   workspaceMembers: Array<{
@@ -291,6 +295,9 @@ type DashboardSectionProps = {
   taskComments: Record<string, TaskComment[]>;
   onLoadTaskExtras: (taskId: string) => Promise<void> | void;
   onAddTaskComment: (taskId: string, content: string) => Promise<void> | void;
+  onUpdateTaskComment: (taskId: string, commentId: string, content: string) => Promise<void> | void;
+  onDeleteTaskComment: (taskId: string, commentId: string) => Promise<void> | void;
+  onAddFeedPost: (workspaceId: string, content: string, taskIds: string[]) => Promise<void> | void;
   onNewProject: () => void;
 };
 
@@ -303,8 +310,11 @@ export function DashboardSection({
   sectors,
   taskTypes,
   dashboardEvents,
+  dashboardFeedPosts,
   dashboardLoading,
   isManager,
+  canPostFeed,
+  currentUserId,
   projectFilterId,
   onChangeProjectFilter,
   workspaceMembers,
@@ -314,6 +324,9 @@ export function DashboardSection({
   taskComments,
   onLoadTaskExtras,
   onAddTaskComment,
+  onUpdateTaskComment,
+  onDeleteTaskComment,
+  onAddFeedPost,
   onNewProject
 }: DashboardSectionProps) {
   const dashboardCaptureRef = useRef<HTMLDivElement>(null);
@@ -321,6 +334,8 @@ export function DashboardSection({
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
   const [detailTaskTab, setDetailTaskTab] = useState<'info' | 'time' | 'deadline' | 'comments' | 'logs'>('info');
   const [commentDraft, setCommentDraft] = useState('');
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingCommentDraft, setEditingCommentDraft] = useState('');
   const [loadingTaskDetails, setLoadingTaskDetails] = useState(false);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryText, setSummaryText] = useState<string>('');
@@ -331,11 +346,18 @@ export function DashboardSection({
   const [calendarView, setCalendarView] = useState<CalendarViewMode>('month');
   const [calendarDate, setCalendarDate] = useState<Date>(() => new Date());
   const [typeSectorFilter, setTypeSectorFilter] = useState<'all' | 'not_done'>('all');
+  const [feedDraft, setFeedDraft] = useState('');
+  const [feedMentions, setFeedMentions] = useState<string[]>([]);
+  const [feedSubmitting, setFeedSubmitting] = useState(false);
 
   useEffect(() => {
     setSummaryGeneratedAt(null);
     setSummaryText('');
     setSummaryMessage(null);
+    setFeedDraft('');
+    setFeedMentions([]);
+    setEditingCommentId(null);
+    setEditingCommentDraft('');
   }, [selectedWorkspace?.id, projectFilterId]);
 
   const statusOptions: TaskStatus[] = [
@@ -434,6 +456,23 @@ export function DashboardSection({
       ])
     );
   }, [workspaceMembers]);
+  const memberAvatarMap = useMemo(() => {
+    return new Map(
+      workspaceMembers.map((member) => [member.userId, member.avatarUrl || null])
+    );
+  }, [workspaceMembers]);
+
+  const getInitials = (value: string) => {
+    const parts = value.trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return value.slice(0, 2).toUpperCase();
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  };
+
+  const taskById = useMemo(
+    () => new Map(tasks.map((task) => [task.id, task])),
+    [tasks]
+  );
 
   const formatMinutes = (minutes: number) => {
     const total = Math.max(0, Math.round(minutes || 0));
@@ -482,6 +521,52 @@ export function DashboardSection({
     }
   };
 
+  const focusTodayAgenda = () => {
+    setCalendarDate(new Date());
+    setCalendarView('day');
+    setTaskViewMode('calendar');
+    setActiveTab('tasks');
+  };
+
+  const submitFeedPost = async () => {
+    if (!selectedWorkspace?.id) return;
+    const trimmed = feedDraft.trim();
+    if (!trimmed) return;
+    setFeedSubmitting(true);
+    try {
+      await Promise.resolve(onAddFeedPost(selectedWorkspace.id, trimmed, feedMentions));
+      setFeedDraft('');
+      setFeedMentions([]);
+    } finally {
+      setFeedSubmitting(false);
+    }
+  };
+
+  const feedItems = useMemo(() => {
+    const eventItems = dashboardEvents.map((event) => ({
+      id: `event-${event.id}`,
+      kind: 'event' as const,
+      createdAt: event.createdAt,
+      userId: event.userId,
+      content: event.summary,
+      taskIds: event.taskId ? [event.taskId] : [],
+      taskId: event.taskId,
+      eventType: event.type,
+      commentId: event.type === 'comment' ? event.id : undefined
+    }));
+    const postItems = dashboardFeedPosts.map((post) => ({
+      id: `post-${post.id}`,
+      kind: 'post' as const,
+      createdAt: post.createdAt,
+      userId: post.createdBy,
+      content: post.content,
+      taskIds: post.taskIds ?? []
+    }));
+    return [...postItems, ...eventItems].sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt)
+    );
+  }, [dashboardEvents, dashboardFeedPosts]);
+
   const sectorColorMap = useMemo(
     () => new Map(sectors.map((item) => [item.name, item.color])),
     [sectors]
@@ -494,6 +579,19 @@ export function DashboardSection({
     () => new Map((selectedWorkspace?.projects ?? []).map((project) => [project.id, project.name])),
     [selectedWorkspace]
   );
+  const feedTaskOptions = useMemo(() => {
+    return tasks
+      .map((task) => {
+        const projectLabel = task.projectId
+          ? projectNameById.get(task.projectId) ?? 'Projeto'
+          : 'Projeto';
+        return {
+          value: task.id,
+          label: `${task.description || task.name || 'Sem descrição'} • ${projectLabel}`
+        };
+      })
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [projectNameById, tasks]);
   const projectFilterOptions = useMemo(() => {
     const entries = new Map<string, string>();
     tasks.forEach((task) => {
@@ -646,6 +744,49 @@ export function DashboardSection({
         .filter((event) => !Number.isNaN(event.start.getTime()) && !Number.isNaN(event.end.getTime()))
     );
   }, [filteredTasks]);
+
+  const todayAgenda = useMemo(() => {
+    const todayIso = getRelativeIsoDate(0);
+    const events = tasks
+      .flatMap((task) =>
+        (task.executionPeriods ?? [])
+          .filter(
+            (period) =>
+              normalizeDateValue(period.date) === todayIso &&
+              period.startTime &&
+              period.endTime
+          )
+          .map((period) => {
+            const start = new Date(`${period.date}T${period.startTime}`);
+            const end = new Date(`${period.date}T${period.endTime}`);
+            return {
+              task,
+              period,
+              start,
+              end
+            };
+          })
+          .filter((event) => !Number.isNaN(event.start.getTime()) && !Number.isNaN(event.end.getTime()))
+      )
+      .sort((a, b) => a.start.getTime() - b.start.getTime());
+
+    const totalMinutes = events.reduce((acc, event) => {
+      const minutes = (event.end.getTime() - event.start.getTime()) / 60000;
+      return acc + (Number.isFinite(minutes) ? Math.max(0, minutes) : 0);
+    }, 0);
+
+    const taskCount = new Set(events.map((event) => event.task.id)).size;
+    const rangeLabel = events.length
+      ? `${formatDateFns(events[0].start, 'HH:mm')} - ${formatDateFns(events[events.length - 1].end, 'HH:mm')}`
+      : '';
+
+    return {
+      events,
+      totalMinutes,
+      taskCount,
+      rangeLabel
+    };
+  }, [tasks]);
 
   const eventsByDay = useMemo(() => {
     const map = new Map<string, typeof scheduledEvents>();
@@ -885,6 +1026,17 @@ export function DashboardSection({
               }`}
             >
               Tarefas
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('feed')}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                activeTab === 'feed'
+                  ? 'bg-[var(--accent)] text-white'
+                  : 'text-[var(--text-secondary)] hover:bg-[var(--muted-bg)]'
+              }`}
+            >
+              Feed
             </button>
           </div>
         </div>
@@ -1285,29 +1437,48 @@ export function DashboardSection({
 
             <div className="grid gap-4 lg:grid-cols-3">
               <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4 lg:col-span-2">
-                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
-                  Últimas interações
-                </h3>
-                <div className="mt-4 space-y-2">
-                  {dashboardEvents.map((event) => (
-                    <div
-                      key={event.id}
-                      className="flex items-start justify-between gap-3 rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2 text-xs"
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                    Agendas do dia
+                  </h3>
+                  {todayAgenda.events.length > 2 && (
+                    <button
+                      type="button"
+                      onClick={focusTodayAgenda}
+                      className="text-[10px] text-[var(--accent)] hover:text-[var(--accent-strong)]"
                     >
-                      <div>
-                        <p className="text-[var(--text-primary)]">{event.summary}</p>
-                        <p className="text-[var(--text-muted)]">
-                          {memberMap.get(event.userId) ?? event.userId}
-                        </p>
-                      </div>
-                      <span className="text-[var(--text-muted)]">
-                        {new Date(event.createdAt).toLocaleDateString('pt-BR')}
-                      </span>
+                      Ver todas
+                    </button>
+                  )}
+                </div>
+                <div className="mt-3">
+                  <div className="text-xs text-[var(--text-muted)]">
+                    {todayAgenda.events.length} períodos • {todayAgenda.taskCount} tarefas •{' '}
+                    {formatMinutes(todayAgenda.totalMinutes)} planejados
+                  </div>
+                  {todayAgenda.rangeLabel && (
+                    <div className="mt-1 text-[10px] text-[var(--text-muted)]">
+                      {todayAgenda.rangeLabel} • Períodos de execução
                     </div>
+                  )}
+                </div>
+                <div className="mt-4 space-y-2">
+                  {todayAgenda.events.slice(0, 6).map((event) => (
+                    <button
+                      key={event.period.id}
+                      type="button"
+                      onClick={() => {
+                        void openTaskDetail(event.task.id);
+                      }}
+                      className="w-full truncate rounded border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--muted-bg)]"
+                    >
+                      {formatDateFns(event.start, 'HH:mm')} - {formatDateFns(event.end, 'HH:mm')} •{' '}
+                      {event.task.description || 'Sem descrição'}
+                    </button>
                   ))}
-                  {!dashboardEvents.length && (
+                  {!todayAgenda.events.length && (
                     <div className="text-xs text-[var(--text-muted)]">
-                      Sem interações registradas.
+                      Nenhum período planejado hoje.
                     </div>
                   )}
                 </div>
@@ -1363,6 +1534,227 @@ export function DashboardSection({
                 </pre>
               </div>
             )}
+          </div>
+        )}
+
+        {activeTab === 'feed' && (
+          <div className="rounded-2xl border border-[var(--panel-border)] bg-[linear-gradient(160deg,rgba(14,165,233,0.06),rgba(2,6,23,0.12))] p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Feed do workspace
+                </h3>
+                <p className="text-xs text-[var(--text-secondary)]">
+                  Pipeline de postagens e logs do time.
+                </p>
+              </div>
+              <div className="text-xs text-[var(--text-muted)]">
+                {feedItems.length} interação(ões)
+              </div>
+            </div>
+
+            {canPostFeed && (
+              <div className="mt-4 rounded-xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-4">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--text-secondary)]">
+                  Nova postagem
+                </div>
+                <textarea
+                  value={feedDraft}
+                  onChange={(event) => setFeedDraft(event.target.value)}
+                  placeholder="Compartilhe uma atualização com o time..."
+                  className="mt-2 min-h-[96px] w-full rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                />
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <div className="min-w-[240px] flex-1">
+                    <MultiFilterSelect
+                      options={feedTaskOptions}
+                      values={feedMentions}
+                      onChange={setFeedMentions}
+                      placeholder="Mencionar tarefas"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void submitFeedPost();
+                    }}
+                    disabled={feedSubmitting || !feedDraft.trim()}
+                    className="inline-flex items-center justify-center rounded-lg border border-[var(--panel-border)] px-4 py-2 text-xs font-semibold text-[var(--text-secondary)] transition hover:border-cyan-400/40 hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {feedSubmitting ? 'Publicando...' : 'Publicar'}
+                  </button>
+                </div>
+                <p className="mt-2 text-[10px] text-[var(--text-muted)]">
+                  Use as menções para relacionar tarefas no feed.
+                </p>
+              </div>
+            )}
+
+            <div className="relative mt-6">
+              <div className="absolute left-3 top-0 h-full w-px bg-[var(--panel-border)]" />
+              <div className="space-y-4">
+                {feedItems.map((item) => {
+                  const taskIds = item.taskIds ?? [];
+                  const isPost = item.kind === 'post';
+                  const eventTypeLabel =
+                    item.kind === 'event'
+                      ? item.eventType === 'time'
+                        ? 'Tempo'
+                        : item.eventType === 'due'
+                          ? 'Prazo'
+                          : item.eventType === 'comment'
+                            ? 'Comentário'
+                            : item.eventType === 'extra'
+                              ? 'Trabalho extra'
+                            : 'Auditoria'
+                      : '';
+                  const canEditComment =
+                    item.kind === 'event' &&
+                    item.eventType === 'comment' &&
+                    item.userId === currentUserId;
+                  const isEditing = Boolean(
+                    canEditComment && item.commentId && editingCommentId === item.commentId
+                  );
+                  return (
+                    <div key={item.id} className="relative pl-10">
+                      <div
+                        className={`absolute left-1.5 top-4 h-3 w-3 rounded-full border ${
+                          isPost
+                            ? 'border-cyan-400/60 bg-cyan-400/30'
+                            : 'border-[var(--panel-border)] bg-[var(--panel-bg)]'
+                        }`}
+                      />
+                      <div className="rounded-2xl border border-[var(--card-border)] bg-[var(--card-bg)] p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-[10px] uppercase tracking-[0.2em] text-[var(--text-muted)]">
+                            {isPost ? 'Postagem' : `Log • ${eventTypeLabel}`}
+                          </span>
+                          <div className="flex items-center gap-3">
+                            {canEditComment && (
+                              <div className="flex items-center gap-2 text-[10px]">
+                                {isEditing ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingCommentId(null);
+                                        setEditingCommentDraft('');
+                                      }}
+                                      className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                                    >
+                                      Cancelar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!item.commentId || !item.taskId) return;
+                                        void Promise.resolve(
+                                          onUpdateTaskComment(item.taskId, item.commentId, editingCommentDraft)
+                                        ).then(() => {
+                                          setEditingCommentId(null);
+                                          setEditingCommentDraft('');
+                                        });
+                                      }}
+                                      className="text-[var(--accent)] hover:text-[var(--accent-strong)]"
+                                      disabled={!editingCommentDraft.trim()}
+                                    >
+                                      Salvar
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!item.commentId) return;
+                                        setEditingCommentId(item.commentId);
+                                        setEditingCommentDraft(item.content);
+                                      }}
+                                      className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                                    >
+                                      Editar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!item.commentId || !item.taskId) return;
+                                        if (!window.confirm('Remover este comentário?')) return;
+                                        void Promise.resolve(
+                                          onDeleteTaskComment(item.taskId, item.commentId)
+                                        ).then(() => {
+                                          setEditingCommentId(null);
+                                          setEditingCommentDraft('');
+                                        });
+                                      }}
+                                      className="text-rose-300 hover:text-rose-200"
+                                    >
+                                      Remover
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
+                            <span className="text-[10px] text-[var(--text-muted)]">
+                              {new Date(item.createdAt).toLocaleString('pt-BR')}
+                            </span>
+                          </div>
+                        </div>
+                        {isEditing ? (
+                          <textarea
+                            value={editingCommentDraft}
+                            onChange={(event) => setEditingCommentDraft(event.target.value)}
+                            className="mt-2 w-full min-h-20 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                          />
+                        ) : (
+                          <div className="mt-2 whitespace-pre-wrap text-sm text-[var(--text-primary)]">
+                            {item.content}
+                          </div>
+                        )}
+                        <div className="mt-2 flex items-center gap-2 text-xs text-[var(--text-muted)]">
+                          {memberAvatarMap.get(item.userId) ? (
+                            <img
+                              src={memberAvatarMap.get(item.userId) ?? ''}
+                              alt=""
+                              className="h-6 w-6 rounded-full object-cover"
+                            />
+                          ) : (
+                            <div className="flex h-6 w-6 items-center justify-center rounded-full border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[10px] font-semibold text-[var(--text-primary)]">
+                              {getInitials(memberMap.get(item.userId) ?? item.userId)}
+                            </div>
+                          )}
+                          <span>{memberMap.get(item.userId) ?? item.userId}</span>
+                        </div>
+                        {taskIds.length > 0 && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {taskIds.map((taskId) => {
+                              const task = taskById.get(taskId);
+                              const label = task?.description || task?.name || taskId;
+                              return (
+                                <button
+                                  key={taskId}
+                                  type="button"
+                                  onClick={() => {
+                                    void openTaskDetail(taskId);
+                                  }}
+                                  className="rounded-full border border-cyan-400/40 bg-cyan-500/10 px-3 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/20"
+                                >
+                                  {label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {!feedItems.length && (
+                  <div className="pl-10 text-xs text-[var(--text-muted)]">
+                    Sem interações registradas ainda.
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         )}
 
@@ -2219,13 +2611,84 @@ export function DashboardSection({
                           key={comment.id}
                           className="rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2"
                         >
-                          <div className="text-xs text-[var(--text-muted)]">
-                            {memberMap.get(comment.createdBy) ?? comment.createdBy} •{' '}
-                            {new Date(comment.createdAt).toLocaleString('pt-BR')}
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--text-muted)]">
+                            <span>
+                              {memberMap.get(comment.createdBy) ?? comment.createdBy} •{' '}
+                              {new Date(comment.createdAt).toLocaleString('pt-BR')}
+                            </span>
+                            {comment.createdBy === currentUserId && (
+                              <div className="flex items-center gap-2">
+                                {editingCommentId === comment.id ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingCommentId(null);
+                                        setEditingCommentDraft('');
+                                      }}
+                                      className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                                    >
+                                      Cancelar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        void Promise.resolve(
+                                          onUpdateTaskComment(detailTask.id, comment.id, editingCommentDraft)
+                                        ).then(() => {
+                                          setEditingCommentId(null);
+                                          setEditingCommentDraft('');
+                                        });
+                                      }}
+                                      className="text-[var(--accent)] hover:text-[var(--accent-strong)]"
+                                      disabled={!editingCommentDraft.trim()}
+                                    >
+                                      Salvar
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingCommentId(comment.id);
+                                        setEditingCommentDraft(comment.content);
+                                      }}
+                                      className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                                    >
+                                      Editar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!window.confirm('Remover este comentário?')) return;
+                                        void Promise.resolve(
+                                          onDeleteTaskComment(detailTask.id, comment.id)
+                                        ).then(() => {
+                                          setEditingCommentId(null);
+                                          setEditingCommentDraft('');
+                                        });
+                                      }}
+                                      className="text-rose-300 hover:text-rose-200"
+                                    >
+                                      Remover
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
                           </div>
-                          <div className="mt-1 text-sm text-[var(--text-primary)] whitespace-pre-wrap">
-                            {comment.content}
-                          </div>
+                          {editingCommentId === comment.id ? (
+                            <textarea
+                              value={editingCommentDraft}
+                              onChange={(event) => setEditingCommentDraft(event.target.value)}
+                              className="mt-2 w-full min-h-20 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                            />
+                          ) : (
+                            <div className="mt-1 text-sm text-[var(--text-primary)] whitespace-pre-wrap">
+                              {comment.content}
+                            </div>
+                          )}
                         </div>
                       ))}
                       {(taskComments[detailTask.id] ?? []).length === 0 && (

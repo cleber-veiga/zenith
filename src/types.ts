@@ -126,3 +126,12 @@ export type ProjectExtraWorkEntry = {
   createdBy: string;
   createdAt: string;
 };
+
+export type WorkspaceFeedPost = {
+  id: string;
+  workspaceId: string;
+  content: string;
+  taskIds: string[];
+  createdBy: string;
+  createdAt: string;
+};

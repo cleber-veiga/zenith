@@ -12,6 +12,7 @@ import type {
   TaskTimeEntry,
   UserProfile,
   UserRole,
+  WorkspaceFeedPost,
   WorkspaceTagOption,
   Workspace
 } from '../types';
@@ -159,10 +160,11 @@ export function SystemScreen({
       taskId: string;
       createdAt: string;
       userId: string;
-      type: 'audit' | 'time' | 'due';
+      type: 'audit' | 'time' | 'due' | 'comment' | 'extra';
       summary: string;
     }>
   >([]);
+  const [dashboardFeedPosts, setDashboardFeedPosts] = useState<WorkspaceFeedPost[]>([]);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'general' | 'members'>('general');
   const [onlineWorkspaceUserIds, setOnlineWorkspaceUserIds] = useState<string[]>([]);
@@ -396,6 +398,32 @@ export function SystemScreen({
     }));
   };
 
+  const loadWorkspaceFeedPosts = async (workspaceId: string) => {
+    const { data, error } = await supabase
+      .from('workspace_feed_posts')
+      .select('id, workspace_id, content, task_ids, created_by, created_at')
+      .eq('workspace_id', workspaceId)
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (error) {
+      console.error('Erro ao carregar feed do workspace:', error);
+      setDashboardFeedPosts([]);
+      return;
+    }
+
+    setDashboardFeedPosts(
+      (data ?? []).map((row) => ({
+        id: row.id,
+        workspaceId: row.workspace_id,
+        content: row.content ?? '',
+        taskIds: (row.task_ids as string[] | null) ?? [],
+        createdBy: row.created_by,
+        createdAt: row.created_at
+      }))
+    );
+  };
+
   const loadDashboardData = async (workspaceId: string, projectId: string) => {
     const workspace = workspaces.find((item) => item.id === workspaceId);
     if (!workspace) return;
@@ -405,6 +433,7 @@ export function SystemScreen({
       setDashboardTasks([]);
       setDashboardEvents([]);
       setDashboardMembers([]);
+      await loadWorkspaceFeedPosts(workspaceId);
       setDashboardLoading(false);
       return;
     }
@@ -544,7 +573,7 @@ export function SystemScreen({
       return;
     }
 
-    const [timeResult, dueResult, auditResult] = await Promise.all([
+    const [timeResult, dueResult, auditResult, commentResult, extraResult] = await Promise.all([
       supabase
         .from('project_task_time_entries')
         .select('id, task_id, created_at, created_by, duration_minutes, source')
@@ -562,12 +591,27 @@ export function SystemScreen({
         .select('id, task_id, created_at, changed_by, field, old_value, new_value')
         .in('task_id', taskIds)
         .order('created_at', { ascending: false })
+        .limit(20),
+      supabase
+        .from('project_task_comments')
+        .select('id, task_id, created_at, created_by, content')
+        .in('task_id', taskIds)
+        .order('created_at', { ascending: false })
+        .limit(20)
+      ,
+      supabase
+        .from('project_extra_work_entries')
+        .select('id, project_id, description, duration_minutes, worked_at, created_by, created_at')
+        .in('project_id', projectIds)
+        .order('created_at', { ascending: false })
         .limit(20)
     ]);
 
     if (timeResult.error) console.error('Erro ao carregar tempo dashboard:', timeResult.error);
     if (dueResult.error) console.error('Erro ao carregar prazos dashboard:', dueResult.error);
     if (auditResult.error) console.error('Erro ao carregar auditoria dashboard:', auditResult.error);
+    if (commentResult.error) console.error('Erro ao carregar comentários dashboard:', commentResult.error);
+    if (extraResult.error) console.error('Erro ao carregar trabalhos extras dashboard:', extraResult.error);
 
     const timeEvents =
       timeResult.data?.map((row) => ({
@@ -634,10 +678,31 @@ export function SystemScreen({
         };
       }) ?? [];
 
-    const merged = [...timeEvents, ...dueEvents, ...auditEvents].sort((a, b) =>
+    const commentEvents =
+      commentResult.data?.map((row) => ({
+        id: row.id,
+        taskId: row.task_id,
+        createdAt: row.created_at,
+        userId: row.created_by,
+        type: 'comment' as const,
+        summary: row.content ?? ''
+      })) ?? [];
+
+    const extraEvents =
+      extraResult.data?.map((row) => ({
+        id: row.id,
+        taskId: '',
+        createdAt: row.created_at,
+        userId: row.created_by,
+        type: 'extra' as const,
+        summary: `Trabalho extra (${row.duration_minutes ?? 0}m): ${row.description ?? ''}`
+      })) ?? [];
+
+    const merged = [...timeEvents, ...dueEvents, ...auditEvents, ...commentEvents, ...extraEvents].sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt)
     );
     setDashboardEvents(merged.slice(0, 12));
+    await loadWorkspaceFeedPosts(workspaceId);
     setDashboardLoading(false);
   };
 
@@ -1823,6 +1888,74 @@ export function SystemScreen({
       };
       return { ...prev, [taskId]: [nextComment, ...current] };
     });
+    setDashboardEvents((prev) => [
+      {
+        id: data.id,
+        taskId: data.task_id,
+        createdAt: data.created_at,
+        userId: data.created_by,
+        type: 'comment',
+        summary: data.content ?? ''
+      },
+      ...prev
+    ]);
+  };
+
+  const handleUpdateTaskComment = async (taskId: string, commentId: string, content: string) => {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+
+    const { data, error } = await supabase
+      .from('project_task_comments')
+      .update({ content: trimmed })
+      .eq('id', commentId)
+      .select('id, task_id, content, created_by, created_at')
+      .single();
+
+    if (error || !data) {
+      console.error('Erro ao atualizar comentário:', error);
+      return;
+    }
+
+    setTaskComments((prev) => {
+      const current = prev[taskId] ?? [];
+      return {
+        ...prev,
+        [taskId]: current.map((comment) =>
+          comment.id === commentId ? { ...comment, content: data.content ?? '' } : comment
+        )
+      };
+    });
+    setDashboardEvents((prev) =>
+      prev.map((event) =>
+        event.type === 'comment' && event.id === commentId
+          ? { ...event, summary: data.content ?? '' }
+          : event
+      )
+    );
+  };
+
+  const handleDeleteTaskComment = async (taskId: string, commentId: string) => {
+    const { error } = await supabase
+      .from('project_task_comments')
+      .delete()
+      .eq('id', commentId);
+
+    if (error) {
+      console.error('Erro ao remover comentário:', error);
+      return;
+    }
+
+    setTaskComments((prev) => {
+      const current = prev[taskId] ?? [];
+      return {
+        ...prev,
+        [taskId]: current.filter((comment) => comment.id !== commentId)
+      };
+    });
+    setDashboardEvents((prev) =>
+      prev.filter((event) => !(event.type === 'comment' && event.id === commentId))
+    );
   };
 
   const handleAddProjectExtraWorkEntry = async (
@@ -1861,6 +1994,17 @@ export function SystemScreen({
       };
       return { ...prev, [projectId]: [nextEntry, ...current] };
     });
+    setDashboardEvents((prev) => [
+      {
+        id: data.id,
+        taskId: '',
+        createdAt: data.created_at,
+        userId: data.created_by,
+        type: 'extra',
+        summary: `Trabalho extra (${data.duration_minutes ?? 0}m): ${data.description ?? ''}`
+      },
+      ...prev
+    ]);
   };
 
   const canManageWorkspaceMembers = isSuperUser
@@ -1903,6 +2047,43 @@ export function SystemScreen({
         prev.map((member) => (member.userId === userId ? { ...member, role } : member))
       );
     }
+  };
+
+  const handleAddWorkspaceFeedPost = async (
+    workspaceId: string,
+    content: string,
+    taskIds: string[]
+  ) => {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+
+    const { data, error } = await supabase
+      .from('workspace_feed_posts')
+      .insert({
+        workspace_id: workspaceId,
+        content: trimmed,
+        task_ids: taskIds,
+        created_by: userId
+      })
+      .select('id, workspace_id, content, task_ids, created_by, created_at')
+      .single();
+
+    if (error || !data) {
+      console.error('Erro ao criar postagem no feed:', error);
+      return;
+    }
+
+    setDashboardFeedPosts((prev) => [
+      {
+        id: data.id,
+        workspaceId: data.workspace_id,
+        content: data.content ?? '',
+        taskIds: (data.task_ids as string[] | null) ?? [],
+        createdBy: data.created_by,
+        createdAt: data.created_at
+      },
+      ...prev
+    ]);
   };
 
   const handleRemoveMember = async (scope: 'workspace' | 'project', userId: string) => {
@@ -2225,8 +2406,11 @@ export function SystemScreen({
                   sectors={sectorOptions}
                   taskTypes={taskTypeOptions}
                   dashboardEvents={dashboardEvents}
+                  dashboardFeedPosts={dashboardFeedPosts}
                   dashboardLoading={dashboardLoading}
-                  isManager={userRole === 'manager'}
+                  isManager={canManageWorkspaces}
+                  canPostFeed={userRole === 'manager' || userRole === 'executor' || isSuperUser}
+                  currentUserId={userId}
                   projectFilterId={dashboardProjectId}
                   onChangeProjectFilter={setDashboardProjectId}
                   workspaceMembers={dashboardWorkspaceMembers}
@@ -2236,6 +2420,9 @@ export function SystemScreen({
                   taskComments={taskComments}
                   onLoadTaskExtras={handleLoadTaskExtras}
                   onAddTaskComment={handleAddTaskComment}
+                  onUpdateTaskComment={handleUpdateTaskComment}
+                  onDeleteTaskComment={handleDeleteTaskComment}
+                  onAddFeedPost={handleAddWorkspaceFeedPost}
                   onNewProject={() => {
                     setProjectName('');
                     setProjectSummary('');
