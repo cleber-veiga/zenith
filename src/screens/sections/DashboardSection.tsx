@@ -126,10 +126,20 @@ type MultiFilterSelectProps = {
   values: string[];
   placeholder: string;
   onChange: (next: string[]) => void;
+  searchable?: boolean;
+  searchPlaceholder?: string;
 };
 
-function MultiFilterSelect({ options, values, placeholder, onChange }: MultiFilterSelectProps) {
+function MultiFilterSelect({
+  options,
+  values,
+  placeholder,
+  onChange,
+  searchable = false,
+  searchPlaceholder = 'Pesquisar...'
+}: MultiFilterSelectProps) {
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ top: 0, left: 0, width: 0 });
@@ -145,18 +155,12 @@ function MultiFilterSelect({ options, values, placeholder, onChange }: MultiFilt
       }
     };
     
-    const handleScroll = () => {
-      if (open) setOpen(false);
-    };
-
     document.addEventListener('mousedown', handleOutside);
-    window.addEventListener('scroll', handleScroll, true);
     
     return () => {
       document.removeEventListener('mousedown', handleOutside);
-      window.removeEventListener('scroll', handleScroll, true);
     };
-  }, [open]);
+  }, []);
 
   const handleToggle = () => {
     if (!open && containerRef.current) {
@@ -166,6 +170,7 @@ function MultiFilterSelect({ options, values, placeholder, onChange }: MultiFilt
         left: rect.left + window.scrollX,
         width: rect.width
       });
+      setSearch('');
     }
     setOpen((prev) => !prev);
   };
@@ -173,6 +178,10 @@ function MultiFilterSelect({ options, values, placeholder, onChange }: MultiFilt
   const selectedLabels = options
     .filter((option) => values.includes(option.value))
     .map((option) => option.label);
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredOptions = options.filter((option) =>
+    !normalizedSearch || option.label.toLowerCase().includes(normalizedSearch)
+  );
 
   return (
     <div ref={containerRef} className="relative">
@@ -213,8 +222,17 @@ function MultiFilterSelect({ options, values, placeholder, onChange }: MultiFilt
               Limpar
             </button>
           </div>
+          {searchable && (
+            <input
+              type="text"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder={searchPlaceholder}
+              className="mb-1.5 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 py-1.5 text-xs text-[var(--text-primary)] outline-none focus:border-cyan-500/50"
+            />
+          )}
           <div className="max-h-52 overflow-y-auto space-y-0.5">
-            {options.map((option) => {
+            {filteredOptions.map((option) => {
               const selected = values.includes(option.value);
               return (
                 <button
@@ -246,9 +264,9 @@ function MultiFilterSelect({ options, values, placeholder, onChange }: MultiFilt
                 </button>
               );
             })}
-            {!options.length && (
+            {!filteredOptions.length && (
               <div className="px-2 py-2 text-center text-xs text-[var(--text-muted)]">
-                Sem opções
+                Sem resultados
               </div>
             )}
           </div>
@@ -297,7 +315,14 @@ type DashboardSectionProps = {
   onAddTaskComment: (taskId: string, content: string) => Promise<void> | void;
   onUpdateTaskComment: (taskId: string, commentId: string, content: string) => Promise<void> | void;
   onDeleteTaskComment: (taskId: string, commentId: string) => Promise<void> | void;
-  onAddFeedPost: (workspaceId: string, content: string, taskIds: string[]) => Promise<void> | void;
+  onAddFeedPost: (
+    workspaceId: string,
+    content: string,
+    taskIds: string[],
+    mentionedUserIds: string[]
+  ) => Promise<void> | void;
+  onUpdateFeedPost: (postId: string, content: string) => Promise<void> | void;
+  onDeleteFeedPost: (postId: string) => Promise<void> | void;
   onNewProject: () => void;
 };
 
@@ -327,6 +352,8 @@ export function DashboardSection({
   onUpdateTaskComment,
   onDeleteTaskComment,
   onAddFeedPost,
+  onUpdateFeedPost,
+  onDeleteFeedPost,
   onNewProject
 }: DashboardSectionProps) {
   const dashboardCaptureRef = useRef<HTMLDivElement>(null);
@@ -336,6 +363,8 @@ export function DashboardSection({
   const [commentDraft, setCommentDraft] = useState('');
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editingCommentDraft, setEditingCommentDraft] = useState('');
+  const [editingPostId, setEditingPostId] = useState<string | null>(null);
+  const [editingPostDraft, setEditingPostDraft] = useState('');
   const [loadingTaskDetails, setLoadingTaskDetails] = useState(false);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryText, setSummaryText] = useState<string>('');
@@ -347,7 +376,13 @@ export function DashboardSection({
   const [calendarDate, setCalendarDate] = useState<Date>(() => new Date());
   const [typeSectorFilter, setTypeSectorFilter] = useState<'all' | 'not_done'>('all');
   const [feedDraft, setFeedDraft] = useState('');
-  const [feedMentions, setFeedMentions] = useState<string[]>([]);
+  const feedTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const [feedTaskMentions, setFeedTaskMentions] = useState<string[]>([]);
+  const [feedMentionRange, setFeedMentionRange] = useState<{ start: number; end: number } | null>(
+    null
+  );
+  const [feedMentionQuery, setFeedMentionQuery] = useState('');
+  const [feedMentionActiveIndex, setFeedMentionActiveIndex] = useState(0);
   const [feedSubmitting, setFeedSubmitting] = useState(false);
 
   useEffect(() => {
@@ -355,9 +390,14 @@ export function DashboardSection({
     setSummaryText('');
     setSummaryMessage(null);
     setFeedDraft('');
-    setFeedMentions([]);
+    setFeedTaskMentions([]);
+    setFeedMentionRange(null);
+    setFeedMentionQuery('');
+    setFeedMentionActiveIndex(0);
     setEditingCommentId(null);
     setEditingCommentDraft('');
+    setEditingPostId(null);
+    setEditingPostDraft('');
   }, [selectedWorkspace?.id, projectFilterId]);
 
   const statusOptions: TaskStatus[] = [
@@ -456,6 +496,121 @@ export function DashboardSection({
       ])
     );
   }, [workspaceMembers]);
+
+  const normalizeMentionToken = (value: string) =>
+    value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]/g, '');
+
+  const getMentionContext = (value: string, caret: number) => {
+    const leftText = value.slice(0, caret);
+    const match = leftText.match(/(^|\s)@([a-zA-Z0-9._-]*)$/);
+    if (!match) return null;
+    const mentionQuery = match[2] ?? '';
+    const start = leftText.length - mentionQuery.length - 1;
+    return { start, end: caret, query: mentionQuery };
+  };
+
+  const getMemberMentionHandle = (member: {
+    userId: string;
+    fullName?: string | null;
+    email?: string | null;
+  }) => {
+    const emailLocalPart = normalizeMentionToken(member.email?.split('@')[0] ?? '');
+    if (emailLocalPart) return emailLocalPart;
+    const firstName = normalizeMentionToken((member.fullName ?? '').split(/\s+/)[0] ?? '');
+    if (firstName) return firstName;
+    const fallback = normalizeMentionToken(member.userId).slice(0, 12);
+    return fallback || member.userId.slice(0, 8);
+  };
+
+  const memberMentionEntries = useMemo(() => {
+    return workspaceMembers.map((member) => {
+      const label = member.fullName || member.email || member.userId;
+      const handle = getMemberMentionHandle(member);
+      return {
+        userId: member.userId,
+        label,
+        fullName: member.fullName ?? '',
+        email: member.email ?? '',
+        handle,
+        avatarUrl: member.avatarUrl || null,
+        searchText: normalizeMentionToken(
+          `${label} ${member.email ?? ''} ${member.fullName ?? ''} ${handle}`
+        )
+      };
+    });
+  }, [workspaceMembers]);
+
+  const mentionHandleToUserId = useMemo(() => {
+    const map = new Map<string, string>();
+    memberMentionEntries.forEach((member) => {
+      const label = member.label;
+      const emailLocalPart = member.email.split('@')[0] ?? '';
+      const fullNameParts = member.fullName
+        .split(/\s+/)
+        .map((part) => normalizeMentionToken(part))
+        .filter(Boolean);
+      const candidates = [
+        normalizeMentionToken(member.handle),
+        normalizeMentionToken(label),
+        normalizeMentionToken(emailLocalPart),
+        ...fullNameParts
+      ].filter(Boolean);
+      candidates.forEach((candidate) => {
+        if (!map.has(candidate)) map.set(candidate, member.userId);
+      });
+    });
+    return map;
+  }, [memberMentionEntries]);
+
+  const mentionedUserIdsFromText = useMemo(() => {
+    const mentions = feedDraft.match(/@[a-zA-Z0-9._-]+/g) ?? [];
+    const resolved = mentions
+      .map((mention) => mentionHandleToUserId.get(normalizeMentionToken(mention.slice(1))))
+      .filter((id): id is string => Boolean(id));
+    return Array.from(new Set(resolved));
+  }, [feedDraft, mentionHandleToUserId]);
+  const feedMentionSuggestions = useMemo(() => {
+    if (!feedMentionRange) return [];
+    const query = normalizeMentionToken(feedMentionQuery);
+    return memberMentionEntries
+      .filter((entry) => !query || entry.handle.includes(query) || entry.searchText.includes(query))
+      .slice(0, 8);
+  }, [feedMentionQuery, feedMentionRange, memberMentionEntries]);
+
+  const refreshFeedMentionState = (value: string, caret: number) => {
+    const mentionContext = getMentionContext(value, caret);
+    if (!mentionContext) {
+      setFeedMentionRange(null);
+      setFeedMentionQuery('');
+      setFeedMentionActiveIndex(0);
+      return;
+    }
+    setFeedMentionRange({ start: mentionContext.start, end: mentionContext.end });
+    setFeedMentionQuery(mentionContext.query);
+    setFeedMentionActiveIndex(0);
+  };
+
+  const applyMemberMention = (member: { handle: string }) => {
+    if (!feedMentionRange) return;
+    const before = feedDraft.slice(0, feedMentionRange.start);
+    const after = feedDraft.slice(feedMentionRange.end);
+    const mentionText = `@${member.handle} `;
+    const nextValue = `${before}${mentionText}${after}`;
+    const nextCaret = before.length + mentionText.length;
+    setFeedDraft(nextValue);
+    setFeedMentionRange(null);
+    setFeedMentionQuery('');
+    setFeedMentionActiveIndex(0);
+    requestAnimationFrame(() => {
+      if (!feedTextareaRef.current) return;
+      feedTextareaRef.current.focus();
+      feedTextareaRef.current.setSelectionRange(nextCaret, nextCaret);
+    });
+  };
   const memberAvatarMap = useMemo(() => {
     return new Map(
       workspaceMembers.map((member) => [member.userId, member.avatarUrl || null])
@@ -534,9 +689,14 @@ export function DashboardSection({
     if (!trimmed) return;
     setFeedSubmitting(true);
     try {
-      await Promise.resolve(onAddFeedPost(selectedWorkspace.id, trimmed, feedMentions));
+      await Promise.resolve(
+        onAddFeedPost(selectedWorkspace.id, trimmed, feedTaskMentions, mentionedUserIdsFromText)
+      );
       setFeedDraft('');
-      setFeedMentions([]);
+      setFeedTaskMentions([]);
+      setFeedMentionRange(null);
+      setFeedMentionQuery('');
+      setFeedMentionActiveIndex(0);
     } finally {
       setFeedSubmitting(false);
     }
@@ -560,7 +720,8 @@ export function DashboardSection({
       createdAt: post.createdAt,
       userId: post.createdBy,
       content: post.content,
-      taskIds: post.taskIds ?? []
+      taskIds: post.taskIds ?? [],
+      mentionedUserIds: post.mentionedUserIds ?? []
     }));
     return [...postItems, ...eventItems].sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt)
@@ -1558,19 +1719,95 @@ export function DashboardSection({
                 <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--text-secondary)]">
                   Nova postagem
                 </div>
-                <textarea
-                  value={feedDraft}
-                  onChange={(event) => setFeedDraft(event.target.value)}
-                  placeholder="Compartilhe uma atualização com o time..."
-                  className="mt-2 min-h-[96px] w-full rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text-primary)]"
-                />
+                <div className="relative">
+                  <textarea
+                    ref={feedTextareaRef}
+                    value={feedDraft}
+                    onChange={(event) => {
+                      const nextValue = event.target.value;
+                      setFeedDraft(nextValue);
+                      refreshFeedMentionState(nextValue, event.target.selectionStart ?? nextValue.length);
+                    }}
+                    onClick={(event) => {
+                      refreshFeedMentionState(
+                        event.currentTarget.value,
+                        event.currentTarget.selectionStart ?? event.currentTarget.value.length
+                      );
+                    }}
+                    onKeyUp={(event) => {
+                      refreshFeedMentionState(
+                        event.currentTarget.value,
+                        event.currentTarget.selectionStart ?? event.currentTarget.value.length
+                      );
+                    }}
+                    onKeyDown={(event) => {
+                      if (!feedMentionRange || !feedMentionSuggestions.length) return;
+                      if (event.key === 'ArrowDown') {
+                        event.preventDefault();
+                        setFeedMentionActiveIndex((prev) => (prev + 1) % feedMentionSuggestions.length);
+                        return;
+                      }
+                      if (event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        setFeedMentionActiveIndex(
+                          (prev) => (prev - 1 + feedMentionSuggestions.length) % feedMentionSuggestions.length
+                        );
+                        return;
+                      }
+                      if (event.key === 'Enter' || event.key === 'Tab') {
+                        event.preventDefault();
+                        const selected = feedMentionSuggestions[feedMentionActiveIndex] ?? feedMentionSuggestions[0];
+                        if (selected) applyMemberMention(selected);
+                        return;
+                      }
+                      if (event.key === 'Escape') {
+                        setFeedMentionRange(null);
+                        setFeedMentionQuery('');
+                        setFeedMentionActiveIndex(0);
+                      }
+                    }}
+                    placeholder="Compartilhe uma atualização com o time... Use @ para mencionar membros."
+                    className="mt-2 min-h-[96px] w-full rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                  />
+                  {feedMentionRange && feedMentionSuggestions.length > 0 && (
+                    <div className="absolute left-0 right-0 z-20 mt-1 rounded-xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-1 shadow-2xl">
+                      {feedMentionSuggestions.map((member, index) => (
+                        <button
+                          key={`${member.userId}-${member.handle}`}
+                          type="button"
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                            applyMemberMention(member);
+                          }}
+                          className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition ${
+                            index === feedMentionActiveIndex
+                              ? 'bg-cyan-500/20 text-cyan-100'
+                              : 'text-[var(--text-secondary)] hover:bg-[var(--muted-bg)] hover:text-[var(--text-primary)]'
+                          }`}
+                        >
+                          {member.avatarUrl ? (
+                            <img src={member.avatarUrl} alt="" className="h-5 w-5 rounded-full object-cover" />
+                          ) : (
+                            <span className="flex h-5 w-5 items-center justify-center rounded-full border border-[var(--panel-border)] bg-[var(--panel-bg-soft)] text-[10px] font-semibold text-[var(--text-primary)]">
+                              {getInitials(member.label)}
+                            </span>
+                          )}
+                          <span className="truncate">@{member.handle}</span>
+                          <span className="truncate text-[10px] text-[var(--text-muted)]">{member.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <div className="mt-3 flex flex-wrap items-center gap-3">
                   <div className="min-w-[240px] flex-1">
                     <MultiFilterSelect
                       options={feedTaskOptions}
-                      values={feedMentions}
-                      onChange={setFeedMentions}
+                      values={feedTaskMentions}
+                      onChange={setFeedTaskMentions}
                       placeholder="Mencionar tarefas"
+                      searchable
+                      searchPlaceholder="Pesquisar por descrição da tarefa..."
                     />
                   </div>
                   <button
@@ -1585,7 +1822,7 @@ export function DashboardSection({
                   </button>
                 </div>
                 <p className="mt-2 text-[10px] text-[var(--text-muted)]">
-                  Use as menções para relacionar tarefas no feed.
+                  Digite `@` para mencionar membros e use o seletor para tarefas.
                 </p>
               </div>
             )}
@@ -1595,6 +1832,8 @@ export function DashboardSection({
               <div className="space-y-4">
                 {feedItems.map((item) => {
                   const taskIds = item.taskIds ?? [];
+                  const mentionedUserIds =
+                    item.kind === 'post' ? item.mentionedUserIds ?? [] : [];
                   const isPost = item.kind === 'post';
                   const eventTypeLabel =
                     item.kind === 'event'
@@ -1612,9 +1851,11 @@ export function DashboardSection({
                     item.kind === 'event' &&
                     item.eventType === 'comment' &&
                     item.userId === currentUserId;
+                  const canManagePost = item.kind === 'post' && item.userId === currentUserId;
                   const isEditing = Boolean(
                     canEditComment && item.commentId && editingCommentId === item.commentId
                   );
+                  const isEditingPost = Boolean(canManagePost && editingPostId === item.id);
                   return (
                     <div key={item.id} className="relative pl-10">
                       <div
@@ -1694,6 +1935,69 @@ export function DashboardSection({
                                 )}
                               </div>
                             )}
+                            {canManagePost && (
+                              <div className="flex items-center gap-2 text-[10px]">
+                                {isEditingPost ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingPostId(null);
+                                        setEditingPostDraft('');
+                                      }}
+                                      className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                                    >
+                                      Cancelar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!item.id.startsWith('post-')) return;
+                                        void Promise.resolve(
+                                          onUpdateFeedPost(item.id.replace('post-', ''), editingPostDraft)
+                                        ).then(() => {
+                                          setEditingPostId(null);
+                                          setEditingPostDraft('');
+                                        });
+                                      }}
+                                      className="text-[var(--accent)] hover:text-[var(--accent-strong)]"
+                                      disabled={!editingPostDraft.trim()}
+                                    >
+                                      Salvar
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingPostId(item.id);
+                                        setEditingPostDraft(item.content);
+                                      }}
+                                      className="text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                                    >
+                                      Editar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!item.id.startsWith('post-')) return;
+                                        if (!window.confirm('Remover esta postagem?')) return;
+                                        void Promise.resolve(
+                                          onDeleteFeedPost(item.id.replace('post-', ''))
+                                        ).then(() => {
+                                          setEditingPostId(null);
+                                          setEditingPostDraft('');
+                                        });
+                                      }}
+                                      className="text-rose-300 hover:text-rose-200"
+                                    >
+                                      Remover
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
                             <span className="text-[10px] text-[var(--text-muted)]">
                               {new Date(item.createdAt).toLocaleString('pt-BR')}
                             </span>
@@ -1703,6 +2007,12 @@ export function DashboardSection({
                           <textarea
                             value={editingCommentDraft}
                             onChange={(event) => setEditingCommentDraft(event.target.value)}
+                            className="mt-2 w-full min-h-20 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                          />
+                        ) : isEditingPost ? (
+                          <textarea
+                            value={editingPostDraft}
+                            onChange={(event) => setEditingPostDraft(event.target.value)}
                             className="mt-2 w-full min-h-20 rounded-lg border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text-primary)]"
                           />
                         ) : (
@@ -1742,6 +2052,18 @@ export function DashboardSection({
                                 </button>
                               );
                             })}
+                          </div>
+                        )}
+                        {mentionedUserIds.length > 0 && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {mentionedUserIds.map((mentionedUserId) => (
+                              <span
+                                key={`${item.id}-${mentionedUserId}`}
+                                className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-3 py-1 text-[10px] text-emerald-200"
+                              >
+                                @{memberMap.get(mentionedUserId) ?? mentionedUserId}
+                              </span>
+                            ))}
                           </div>
                         )}
                       </div>

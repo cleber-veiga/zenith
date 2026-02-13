@@ -132,6 +132,18 @@ export type WorkspaceFeedPost = {
   workspaceId: string;
   content: string;
   taskIds: string[];
+  mentionedUserIds: string[];
   createdBy: string;
   createdAt: string;
+};
+
+export type WorkspaceNotification = {
+  id: string;
+  workspaceId: string;
+  postId: string;
+  mentionedUserId: string;
+  createdBy: string;
+  createdAt: string;
+  readAt?: string | null;
+  postContent?: string | null;
 };

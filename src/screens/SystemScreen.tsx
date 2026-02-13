@@ -13,6 +13,7 @@ import type {
   UserProfile,
   UserRole,
   WorkspaceFeedPost,
+  WorkspaceNotification,
   WorkspaceTagOption,
   Workspace
 } from '../types';
@@ -165,6 +166,7 @@ export function SystemScreen({
     }>
   >([]);
   const [dashboardFeedPosts, setDashboardFeedPosts] = useState<WorkspaceFeedPost[]>([]);
+  const [workspaceNotifications, setWorkspaceNotifications] = useState<WorkspaceNotification[]>([]);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'general' | 'members'>('general');
   const [onlineWorkspaceUserIds, setOnlineWorkspaceUserIds] = useState<string[]>([]);
@@ -401,7 +403,7 @@ export function SystemScreen({
   const loadWorkspaceFeedPosts = async (workspaceId: string) => {
     const { data, error } = await supabase
       .from('workspace_feed_posts')
-      .select('id, workspace_id, content, task_ids, created_by, created_at')
+      .select('id, workspace_id, content, task_ids, mentioned_user_ids, created_by, created_at')
       .eq('workspace_id', workspaceId)
       .order('created_at', { ascending: false })
       .limit(50);
@@ -418,8 +420,55 @@ export function SystemScreen({
         workspaceId: row.workspace_id,
         content: row.content ?? '',
         taskIds: (row.task_ids as string[] | null) ?? [],
+        mentionedUserIds: (row.mentioned_user_ids as string[] | null) ?? [],
         createdBy: row.created_by,
         createdAt: row.created_at
+      }))
+    );
+  };
+
+  const loadWorkspaceNotifications = async () => {
+    const { data, error } = await supabase
+      .from('workspace_notifications')
+      .select('id, workspace_id, post_id, mentioned_user_id, created_by, created_at, read_at')
+      .eq('mentioned_user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(30);
+
+    if (error) {
+      console.error('Erro ao carregar notificações:', error);
+      setWorkspaceNotifications([]);
+      return;
+    }
+
+    const postIds = Array.from(new Set((data ?? []).map((row) => row.post_id).filter(Boolean)));
+    let postContentById = new Map<string, string | null>();
+
+    if (postIds.length) {
+      const { data: postRows, error: postError } = await supabase
+        .from('workspace_feed_posts')
+        .select('id, content')
+        .in('id', postIds);
+
+      if (postError) {
+        console.error('Erro ao carregar conteúdo das notificações:', postError);
+      } else {
+        postContentById = new Map(
+          (postRows ?? []).map((row) => [row.id, row.content ?? null])
+        );
+      }
+    }
+
+    setWorkspaceNotifications(
+      (data ?? []).map((row) => ({
+        id: row.id,
+        workspaceId: row.workspace_id,
+        postId: row.post_id,
+        mentionedUserId: row.mentioned_user_id,
+        createdBy: row.created_by,
+        createdAt: row.created_at,
+        readAt: row.read_at,
+        postContent: postContentById.get(row.post_id) ?? null
       }))
     );
   };
@@ -1414,12 +1463,87 @@ export function SystemScreen({
   }, [currentView, selectedWorkspaceId, dashboardProjectId, workspaces.length]);
 
   useEffect(() => {
+    void loadWorkspaceNotifications();
+  }, [userId]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      void loadWorkspaceNotifications();
+    }, 30000);
+    return () => window.clearInterval(intervalId);
+  }, [userId]);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel(`workspace-notifications:${userId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'workspace_notifications',
+          filter: `mentioned_user_id=eq.${userId}`
+        },
+        () => {
+          void loadWorkspaceNotifications();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'workspace_notifications',
+          filter: `mentioned_user_id=eq.${userId}`
+        },
+        () => {
+          void loadWorkspaceNotifications();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userId]);
+
+  useEffect(() => {
     if (canManageWorkspaces) return;
     if (currentView === 'settings') {
       setCurrentView('dashboard');
       setSettingsTab('general');
     }
   }, [canManageWorkspaces, currentView]);
+
+  const handleMarkNotificationAsRead = async (notificationId: string) => {
+    const now = new Date().toISOString();
+    setWorkspaceNotifications((prev) =>
+      prev.map((item) => (item.id === notificationId ? { ...item, readAt: item.readAt ?? now } : item))
+    );
+    const { error } = await supabase
+      .from('workspace_notifications')
+      .update({ read_at: now })
+      .eq('id', notificationId)
+      .eq('mentioned_user_id', userId);
+    if (error) {
+      console.error('Erro ao marcar notificação como lida:', error);
+      void loadWorkspaceNotifications();
+    }
+  };
+
+  const handleMarkAllNotificationsAsRead = async () => {
+    const now = new Date().toISOString();
+    setWorkspaceNotifications((prev) => prev.map((item) => ({ ...item, readAt: item.readAt ?? now })));
+    const { error } = await supabase
+      .from('workspace_notifications')
+      .update({ read_at: now })
+      .eq('mentioned_user_id', userId)
+      .is('read_at', null);
+    if (error) {
+      console.error('Erro ao marcar todas notificações como lidas:', error);
+      void loadWorkspaceNotifications();
+    }
+  };
 
   const handleAddTask = async (projectId: string, task: Omit<ProjectTask, 'id'>) => {
     const dueDateCurrent = task.dueDateCurrent || task.dueDateOriginal || '';
@@ -2052,20 +2176,26 @@ export function SystemScreen({
   const handleAddWorkspaceFeedPost = async (
     workspaceId: string,
     content: string,
-    taskIds: string[]
+    taskIds: string[],
+    mentionedUserIds: string[]
   ) => {
     const trimmed = content.trim();
     if (!trimmed) return;
+    const normalizedTaskIds = Array.from(new Set(taskIds.filter(Boolean)));
+    const normalizedMentionedUserIds = Array.from(
+      new Set(mentionedUserIds.filter((mentionedUserId) => mentionedUserId && mentionedUserId !== userId))
+    );
 
     const { data, error } = await supabase
       .from('workspace_feed_posts')
       .insert({
         workspace_id: workspaceId,
         content: trimmed,
-        task_ids: taskIds,
+        task_ids: normalizedTaskIds,
+        mentioned_user_ids: normalizedMentionedUserIds,
         created_by: userId
       })
-      .select('id, workspace_id, content, task_ids, created_by, created_at')
+      .select('id, workspace_id, content, task_ids, mentioned_user_ids, created_by, created_at')
       .single();
 
     if (error || !data) {
@@ -2079,11 +2209,52 @@ export function SystemScreen({
         workspaceId: data.workspace_id,
         content: data.content ?? '',
         taskIds: (data.task_ids as string[] | null) ?? [],
+        mentionedUserIds: (data.mentioned_user_ids as string[] | null) ?? [],
         createdBy: data.created_by,
         createdAt: data.created_at
       },
       ...prev
     ]);
+  };
+
+  const handleUpdateWorkspaceFeedPost = async (postId: string, content: string) => {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    const { error } = await supabase
+      .from('workspace_feed_posts')
+      .update({ content: trimmed })
+      .eq('id', postId)
+      .eq('created_by', userId);
+
+    if (error) {
+      console.error('Erro ao atualizar postagem no feed:', error);
+      return;
+    }
+
+    setDashboardFeedPosts((prev) =>
+      prev.map((post) => (post.id === postId ? { ...post, content: trimmed } : post))
+    );
+    setWorkspaceNotifications((prev) =>
+      prev.map((notification) =>
+        notification.postId === postId ? { ...notification, postContent: trimmed } : notification
+      )
+    );
+  };
+
+  const handleDeleteWorkspaceFeedPost = async (postId: string) => {
+    const { error } = await supabase
+      .from('workspace_feed_posts')
+      .delete()
+      .eq('id', postId)
+      .eq('created_by', userId);
+
+    if (error) {
+      console.error('Erro ao remover postagem no feed:', error);
+      return;
+    }
+
+    setDashboardFeedPosts((prev) => prev.filter((post) => post.id !== postId));
+    setWorkspaceNotifications((prev) => prev.filter((notification) => notification.postId !== postId));
   };
 
   const handleRemoveMember = async (scope: 'workspace' | 'project', userId: string) => {
@@ -2297,6 +2468,16 @@ export function SystemScreen({
       ])
     ).values()
   );
+  const canPostInSelectedWorkspace =
+    isSuperUser ||
+    Boolean(selectedWorkspaceId && workspaceMembers.some((member) => member.userId === userId));
+  const workspaceNameById = Object.fromEntries(workspaces.map((workspace) => [workspace.id, workspace.name]));
+  const notificationActorById = Object.fromEntries(
+    dashboardWorkspaceMembers.map((member) => [
+      member.userId,
+      member.fullName || member.email || member.userId
+    ])
+  );
 
   return (
     <div className="fixed inset-0 overflow-hidden bg-[var(--page-bg)] text-[var(--text-primary)]">
@@ -2376,6 +2557,11 @@ export function SystemScreen({
               setCurrentView('profile');
               setSelectedProjectId(null);
             }}
+            notifications={workspaceNotifications}
+            workspaceNameById={workspaceNameById}
+            notificationActorById={notificationActorById}
+            onMarkNotificationRead={handleMarkNotificationAsRead}
+            onMarkAllNotificationsRead={handleMarkAllNotificationsAsRead}
           />
 
           <section className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
@@ -2409,7 +2595,7 @@ export function SystemScreen({
                   dashboardFeedPosts={dashboardFeedPosts}
                   dashboardLoading={dashboardLoading}
                   isManager={canManageWorkspaces}
-                  canPostFeed={userRole === 'manager' || userRole === 'executor' || isSuperUser}
+                  canPostFeed={canPostInSelectedWorkspace}
                   currentUserId={userId}
                   projectFilterId={dashboardProjectId}
                   onChangeProjectFilter={setDashboardProjectId}
@@ -2423,6 +2609,8 @@ export function SystemScreen({
                   onUpdateTaskComment={handleUpdateTaskComment}
                   onDeleteTaskComment={handleDeleteTaskComment}
                   onAddFeedPost={handleAddWorkspaceFeedPost}
+                  onUpdateFeedPost={handleUpdateWorkspaceFeedPost}
+                  onDeleteFeedPost={handleDeleteWorkspaceFeedPost}
                   onNewProject={() => {
                     setProjectName('');
                     setProjectSummary('');
