@@ -69,6 +69,7 @@ export type ProjectTask = {
   startDate: string;
   dueDateOriginal: string;
   dueDateCurrent: string;
+  completionDate: string;
   estimatedMinutes: number;
   actualMinutes: number;
   executionPeriods: TaskExecutionPeriod[];

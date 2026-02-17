@@ -70,6 +70,7 @@ serve(async (req) => {
     recipientEmail?: string;
     dayStart?: string;
     dayEnd?: string;
+    debug?: boolean;
     dashboardPdfBase64?: string;
     dashboardPdfFileName?: string;
   };
@@ -87,6 +88,7 @@ serve(async (req) => {
   const recipientEmail = payload.recipientEmail?.trim();
   const dayStart = payload.dayStart?.trim();
   const dayEnd = payload.dayEnd?.trim();
+  const debug = Boolean(payload.debug);
   const dashboardPdfBase64 = payload.dashboardPdfBase64?.trim();
   const dashboardPdfFileName = payload.dashboardPdfFileName?.trim() || 'dashboard.pdf';
 
@@ -144,14 +146,23 @@ serve(async (req) => {
     return jsonResponse({ error: 'No projects found for selected scope' }, 400);
   }
 
+  interface Task {
+    id: string;
+    name: string | null;
+    description: string | null;
+    status: string | null;
+    priority: string | null;
+    project_id: string;
+  }
+
   const { data: tasks, error: tasksError } = await supabaseAdmin
     .from('project_tasks')
     .select('id, name, description, status, priority, project_id')
     .in('project_id', projectIds);
 
   if (tasksError) return jsonResponse({ error: tasksError.message }, 500);
-  const taskList = tasks ?? [];
-  const taskById = new Map(taskList.map((task) => [task.id, task]));
+  const taskList = (tasks ?? []) as unknown as Task[];
+  const taskById = new Map<string, Task>(taskList.map((task) => [task.id, task]));
   const taskIds = taskList.map((task) => task.id);
 
   const [timeResult, dueResult, auditResult] = await Promise.all([
@@ -251,6 +262,11 @@ serve(async (req) => {
     .map(([status, count]) => `${status}: ${count}`)
     .join(', ');
 
+  let aiAttempted = false;
+  let aiSucceeded = false;
+  let aiStatus: number | null = null;
+  let aiError: string | null = null;
+
   if (!openAiApiKey) {
     console.error('❌ Missing OPENAI_API_KEY environment variable');
     return jsonResponse({ error: 'Missing OPENAI_API_KEY' }, 500);
@@ -272,32 +288,22 @@ serve(async (req) => {
     .slice(0, 15); // Limit to 15 to save tokens
 
   const prompt = [
-    `Atue como um Gerente de Projetos detalhista. Analise os dados do workspace "${workspaceName}" entre ${dayStart} e ${dayEnd}.`,
+    `Atue como um assistente de Gerenciamento de Projetos. Analise os dados do workspace "${workspaceName}" entre ${dayStart} e ${dayEnd}.`,
     '',
-    `DADOS QUANTITATIVOS:`,
+    `DADOS GERAIS:`,
     `- Total de tarefas no escopo: ${taskList.length}`,
     `- Snapshot de Status: ${statusSummary || 'Sem dados'}`,
-    `- Volume de interações registradas: ${allChanges.length}`,
+    `- Volume de interações: ${allChanges.length}`,
     '',
-    `TAREFAS SEM MOVIMENTAÇÃO HOJE (Amostra de prioritárias/ativas):`,
-    stalledTasks.length ? stalledTasks.join('\n') : '- Nenhuma tarefa parada encontrada.',
+    `INSTRUÇÕES (PT-BR):`,
+    `Gere um resumo direto e objetivo em Markdown, sem formalidades excessivas ou opiniões.`,
+    `IMPORTANTE: A resposta deve ser estritamente formatada em Markdown (use negrito, listas, etc).`,
+    `O resumo deve conter:`,
+    `1. Como foi o dia (visão geral).`,
+    `2. Quais tarefas foram concluídas (se houver).`,
+    `3. Quantas tarefas ainda estão em aberto e um breve panorama do status delas.`,
     '',
-    `INSTRUÇÕES DO RELATÓRIO (PT-BR):`,
-    `Gere um Relatório Operacional Detalhado seguindo a estrutura abaixo:`,
-    '',
-    `1. ANÁLISE DE FLUXO (Visão Macro):`,
-    `   - Qual foi o ritmo do dia? (Ex: Foco em entregas, dia de planejamento, muitas correções/bugs?)`,
-    '',
-    `2. DETALHAMENTO POR TAREFA (Ocorrências):`,
-    `   - Agrupe os logs abaixo por TAREFA.`,
-    `   - Para cada tarefa ativa, descreva o ciclo de vida no período (Ex: "A tarefa X iniciou em 'To Do', foi assumida por Fulano e movida para 'Review'").`,
-    `   - Mencione explicitamente quem realizou as ações chaves.`,
-    '',
-    `3. PONTOS DE ATENÇÃO E BLOQUEIOS:`,
-    `   - Identifique tarefas que "andaram para trás" (ex: de Review para Doing) ou que tiveram muitas interações sem conclusão.`,
-    `   - Analise as "Tarefas sem movimentação" citadas acima se parecerem críticas (High priority).`,
-    '',
-    `LOGS DE ATIVIDADE (Matéria-prima):`,
+    `LOGS DE ATIVIDADE (Contexto):`,
     allChanges.slice(-200).join('\n')
   ].join('\n');
 
@@ -306,6 +312,7 @@ serve(async (req) => {
   console.log(`Prompt length: ${prompt.length} characters`);
 
   try {
+    aiAttempted = true;
     const aiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -317,7 +324,7 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: 'You are a helpful Project Manager assistant.'
+            content: 'Você é um(a) assistente de Gerente de Projetos muito prestativo(a).'
           },
           {
             role: 'user',
@@ -329,10 +336,12 @@ serve(async (req) => {
       })
     });
 
+    aiStatus = aiResponse.status;
     console.log(`📡 OpenAI Response Status: ${aiResponse.status} ${aiResponse.statusText}`);
 
     if (!aiResponse.ok) {
       const errorText = await aiResponse.text();
+      aiError = `OpenAI API Error: ${errorText}`;
       console.error(`❌ OpenAI Error Body: ${errorText}`);
       return jsonResponse({ error: `OpenAI API Error: ${errorText}` }, 500);
     }
@@ -341,13 +350,16 @@ serve(async (req) => {
     const aiText = aiPayload.choices?.[0]?.message?.content?.trim();
     
     if (!aiText) {
+      aiError = 'OpenAI returned empty response';
       console.error('❌ OpenAI returned empty content');
       return jsonResponse({ error: 'OpenAI returned empty response' }, 500);
     }
     
     console.log('✅ OpenAI summary generated successfully');
     summaryText = aiText;
+    aiSucceeded = true;
   } catch (error) {
+    aiError = 'AI generation failed';
     console.error('❌ AI generation exception:', error);
     return jsonResponse({ error: `AI generation failed: ${error}` }, 500);
   }
@@ -357,7 +369,24 @@ serve(async (req) => {
       ok: true,
       summaryText,
       totalChanges: allChanges.length,
-      generatedWithAI: Boolean(openAiApiKey)
+      generatedWithAI: Boolean(openAiApiKey),
+      ...(debug
+        ? {
+            debug: {
+              openAiKeyPresent: Boolean(openAiApiKey),
+              openAiModel,
+              promptLength: prompt.length,
+              aiAttempted,
+              aiSucceeded,
+              aiStatus,
+              aiError,
+              taskCount: taskList.length,
+              timeEntries: timeEntries.length,
+              dueChanges: dueChanges.length,
+              auditLogs: auditLogs.length
+            }
+          }
+        : {})
     });
   }
 

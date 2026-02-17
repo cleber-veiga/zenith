@@ -166,6 +166,15 @@ export function SystemScreen({
     }>
   >([]);
   const [dashboardFeedPosts, setDashboardFeedPosts] = useState<WorkspaceFeedPost[]>([]);
+  const [dashboardEventsLoading, setDashboardEventsLoading] = useState(false);
+  const [dashboardEventsHasMore, setDashboardEventsHasMore] = useState(true);
+  const [dashboardEventsScope, setDashboardEventsScope] = useState<{
+    workspaceId: string;
+    projectIds: string[];
+  } | null>(null);
+  const [feedLoading, setFeedLoading] = useState(false);
+  const [feedHasMore, setFeedHasMore] = useState(true);
+  const [feedWorkspaceId, setFeedWorkspaceId] = useState<string | null>(null);
   const [workspaceNotifications, setWorkspaceNotifications] = useState<WorkspaceNotification[]>([]);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'general' | 'members'>('general');
@@ -306,6 +315,7 @@ export function SystemScreen({
           'start_date',
           'due_date_original',
           'due_date_current',
+          'completion_date',
           'execution_periods',
           'estimated_minutes',
           'actual_minutes',
@@ -357,6 +367,7 @@ export function SystemScreen({
       startDate: row.start_date ?? '',
       dueDateOriginal: row.due_date_original ?? '',
       dueDateCurrent: row.due_date_current ?? '',
+      completionDate: row.completion_date ?? '',
       executionPeriods: (row.execution_periods as ProjectTask['executionPeriods'] | null) ?? [],
       estimatedMinutes: row.estimated_minutes ?? 0,
       actualMinutes: row.actual_minutes ?? 0,
@@ -400,31 +411,64 @@ export function SystemScreen({
     }));
   };
 
-  const loadWorkspaceFeedPosts = async (workspaceId: string) => {
+  const FEED_PAGE_SIZE = 30;
+  const FEED_EVENTS_PAGE_SIZE = 30;
+
+  const loadWorkspaceFeedPosts = async (
+    workspaceId: string,
+    options?: { append?: boolean }
+  ) => {
+    const append = options?.append ?? false;
+    const shouldReset = !append || feedWorkspaceId !== workspaceId;
+    if (feedLoading && !shouldReset) return;
+    if (shouldReset) {
+      setFeedHasMore(true);
+    }
+    setFeedLoading(true);
+
+    const from = shouldReset ? 0 : dashboardFeedPosts.length;
+    const to = from + FEED_PAGE_SIZE - 1;
+
     const { data, error } = await supabase
       .from('workspace_feed_posts')
       .select('id, workspace_id, content, task_ids, mentioned_user_ids, created_by, created_at')
       .eq('workspace_id', workspaceId)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .range(from, to);
 
     if (error) {
       console.error('Erro ao carregar feed do workspace:', error);
-      setDashboardFeedPosts([]);
+      if (shouldReset) {
+        setDashboardFeedPosts([]);
+      }
+      setFeedHasMore(false);
+      setFeedLoading(false);
       return;
     }
 
-    setDashboardFeedPosts(
-      (data ?? []).map((row) => ({
-        id: row.id,
-        workspaceId: row.workspace_id,
-        content: row.content ?? '',
-        taskIds: (row.task_ids as string[] | null) ?? [],
-        mentionedUserIds: (row.mentioned_user_ids as string[] | null) ?? [],
-        createdBy: row.created_by,
-        createdAt: row.created_at
-      }))
-    );
+    const mapped = (data ?? []).map((row) => ({
+      id: row.id,
+      workspaceId: row.workspace_id,
+      content: row.content ?? '',
+      taskIds: (row.task_ids as string[] | null) ?? [],
+      mentionedUserIds: (row.mentioned_user_ids as string[] | null) ?? [],
+      createdBy: row.created_by,
+      createdAt: row.created_at
+    }));
+
+    setDashboardFeedPosts((prev) => {
+      if (shouldReset) return mapped;
+      const seen = new Set(prev.map((post) => post.id));
+      const next = [...prev];
+      mapped.forEach((post) => {
+        if (!seen.has(post.id)) next.push(post);
+      });
+      return next;
+    });
+
+    setFeedHasMore((data ?? []).length === FEED_PAGE_SIZE);
+    setFeedWorkspaceId(workspaceId);
+    setFeedLoading(false);
   };
 
   const loadWorkspaceNotifications = async () => {
@@ -482,6 +526,8 @@ export function SystemScreen({
       setDashboardTasks([]);
       setDashboardEvents([]);
       setDashboardMembers([]);
+      setDashboardEventsHasMore(false);
+      setDashboardEventsScope(null);
       await loadWorkspaceFeedPosts(workspaceId);
       setDashboardLoading(false);
       return;
@@ -504,6 +550,7 @@ export function SystemScreen({
           'start_date',
           'due_date_original',
           'due_date_current',
+          'completion_date',
           'execution_periods',
           'estimated_minutes',
           'actual_minutes',
@@ -553,6 +600,7 @@ export function SystemScreen({
       startDate: row.start_date ?? '',
       dueDateOriginal: row.due_date_original ?? '',
       dueDateCurrent: row.due_date_current ?? '',
+      completionDate: row.completion_date ?? '',
       executionPeriods: (row.execution_periods as ProjectTask['executionPeriods'] | null) ?? [],
       estimatedMinutes: row.estimated_minutes ?? 0,
       actualMinutes: row.actual_minutes ?? 0,
@@ -618,6 +666,8 @@ export function SystemScreen({
     const taskIds = mappedTasks.map((item) => item.id);
     if (!taskIds.length) {
       setDashboardEvents([]);
+      setDashboardEventsHasMore(false);
+      setDashboardEventsScope({ workspaceId, projectIds });
       setDashboardLoading(false);
       return;
     }
@@ -628,32 +678,32 @@ export function SystemScreen({
         .select('id, task_id, created_at, created_by, duration_minutes, source')
         .in('task_id', taskIds)
         .order('created_at', { ascending: false })
-        .limit(20),
+        .limit(FEED_EVENTS_PAGE_SIZE),
       supabase
         .from('project_task_due_date_changes')
         .select('id, task_id, created_at, changed_by, previous_date, new_date, reason')
         .in('task_id', taskIds)
         .order('created_at', { ascending: false })
-        .limit(20),
+        .limit(FEED_EVENTS_PAGE_SIZE),
       supabase
         .from('project_task_audit_logs')
         .select('id, task_id, created_at, changed_by, field, old_value, new_value')
         .in('task_id', taskIds)
         .order('created_at', { ascending: false })
-        .limit(20),
+        .limit(FEED_EVENTS_PAGE_SIZE),
       supabase
         .from('project_task_comments')
         .select('id, task_id, created_at, created_by, content')
         .in('task_id', taskIds)
         .order('created_at', { ascending: false })
-        .limit(20)
+        .limit(FEED_EVENTS_PAGE_SIZE)
       ,
       supabase
         .from('project_extra_work_entries')
         .select('id, project_id, description, duration_minutes, worked_at, created_by, created_at')
         .in('project_id', projectIds)
         .order('created_at', { ascending: false })
-        .limit(20)
+        .limit(FEED_EVENTS_PAGE_SIZE)
     ]);
 
     if (timeResult.error) console.error('Erro ao carregar tempo dashboard:', timeResult.error);
@@ -750,9 +800,205 @@ export function SystemScreen({
     const merged = [...timeEvents, ...dueEvents, ...auditEvents, ...commentEvents, ...extraEvents].sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt)
     );
-    setDashboardEvents(merged.slice(0, 12));
+    setDashboardEvents(merged.slice(0, FEED_EVENTS_PAGE_SIZE));
+    setDashboardEventsHasMore(
+      (timeResult.data?.length ?? 0) === FEED_EVENTS_PAGE_SIZE ||
+        (dueResult.data?.length ?? 0) === FEED_EVENTS_PAGE_SIZE ||
+        (auditResult.data?.length ?? 0) === FEED_EVENTS_PAGE_SIZE ||
+        (commentResult.data?.length ?? 0) === FEED_EVENTS_PAGE_SIZE ||
+        (extraResult.data?.length ?? 0) === FEED_EVENTS_PAGE_SIZE
+    );
+    setDashboardEventsScope({ workspaceId, projectIds });
     await loadWorkspaceFeedPosts(workspaceId);
     setDashboardLoading(false);
+  };
+
+  const loadMoreDashboardEvents = async () => {
+    if (dashboardEventsLoading || !dashboardEventsHasMore || !dashboardEventsScope) return;
+    const { projectIds } = dashboardEventsScope;
+    const taskIds = dashboardTasks.map((task) => task.id).filter(Boolean);
+    if (!taskIds.length || !projectIds.length) {
+      setDashboardEventsHasMore(false);
+      return;
+    }
+
+    const oldestEvent = [...dashboardEvents]
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+    const beforeDate = oldestEvent?.createdAt;
+    if (!beforeDate) {
+      setDashboardEventsHasMore(false);
+      return;
+    }
+
+    setDashboardEventsLoading(true);
+
+    const [timeResult, dueResult, auditResult, commentResult, extraResult] = await Promise.all([
+      supabase
+        .from('project_task_time_entries')
+        .select('id, task_id, created_at, created_by, duration_minutes, source')
+        .in('task_id', taskIds)
+        .lt('created_at', beforeDate)
+        .order('created_at', { ascending: false })
+        .limit(FEED_EVENTS_PAGE_SIZE),
+      supabase
+        .from('project_task_due_date_changes')
+        .select('id, task_id, created_at, changed_by, previous_date, new_date, reason')
+        .in('task_id', taskIds)
+        .lt('created_at', beforeDate)
+        .order('created_at', { ascending: false })
+        .limit(FEED_EVENTS_PAGE_SIZE),
+      supabase
+        .from('project_task_audit_logs')
+        .select('id, task_id, created_at, changed_by, field, old_value, new_value')
+        .in('task_id', taskIds)
+        .lt('created_at', beforeDate)
+        .order('created_at', { ascending: false })
+        .limit(FEED_EVENTS_PAGE_SIZE),
+      supabase
+        .from('project_task_comments')
+        .select('id, task_id, created_at, created_by, content')
+        .in('task_id', taskIds)
+        .lt('created_at', beforeDate)
+        .order('created_at', { ascending: false })
+        .limit(FEED_EVENTS_PAGE_SIZE),
+      supabase
+        .from('project_extra_work_entries')
+        .select('id, project_id, description, duration_minutes, worked_at, created_by, created_at')
+        .in('project_id', projectIds)
+        .lt('created_at', beforeDate)
+        .order('created_at', { ascending: false })
+        .limit(FEED_EVENTS_PAGE_SIZE)
+    ]);
+
+    if (timeResult.error) console.error('Erro ao carregar tempo dashboard:', timeResult.error);
+    if (dueResult.error) console.error('Erro ao carregar prazos dashboard:', dueResult.error);
+    if (auditResult.error) console.error('Erro ao carregar auditoria dashboard:', auditResult.error);
+    if (commentResult.error) console.error('Erro ao carregar comentários dashboard:', commentResult.error);
+    if (extraResult.error) console.error('Erro ao carregar trabalhos extras dashboard:', extraResult.error);
+
+    const localMemberMap = new Map<string, string>();
+    workspaceMembers.forEach((m) => {
+      localMemberMap.set(m.userId, m.fullName || m.email || m.userId);
+    });
+    dashboardMembers.forEach((m) => {
+      if (!localMemberMap.has(m.userId)) {
+        localMemberMap.set(m.userId, m.fullName || m.email || m.userId);
+      }
+    });
+
+    const timeEvents =
+      timeResult.data?.map((row) => ({
+        id: row.id,
+        taskId: row.task_id,
+        createdAt: row.created_at,
+        userId: row.created_by,
+        type: 'time' as const,
+        summary: `Tempo ${row.duration_minutes ?? 0}m (${row.source})`
+      })) ?? [];
+
+    const dueEvents =
+      dueResult.data?.map((row) => ({
+        id: row.id,
+        taskId: row.task_id,
+        createdAt: row.created_at,
+        userId: row.changed_by,
+        type: 'due' as const,
+        summary: `Prazo ${row.previous_date ? row.previous_date.split('-').reverse().join('/') : '-'} → ${row.new_date ? row.new_date.split('-').reverse().join('/') : '-'}`
+      })) ?? [];
+
+    const formatAuditValue = (field: string, value: string | null) => {
+      if (!value || value === 'null') return '-';
+
+      if (field === 'executionPeriods') {
+        try {
+          const parsed = JSON.parse(value);
+          if (Array.isArray(parsed)) {
+            if (!parsed.length) return 'Nenhum';
+            return parsed
+              .map((p: any) => {
+                const d = p.date ? p.date.split('-').reverse().join('/') : '?';
+                const t =
+                  p.startTime && p.endTime ? `${p.startTime}-${p.endTime}` : p.startTime || '?';
+                return `[${d} ${t}]`;
+              })
+              .join(', ');
+          }
+        } catch {}
+      }
+
+      if (['Executor', 'Validador', 'Informar', 'executorIds', 'validatorIds', 'informIds'].includes(field)) {
+        try {
+          const parsed = JSON.parse(value);
+          if (Array.isArray(parsed)) {
+            if (!parsed.length) return 'Nenhum';
+            return parsed.map((id: string) => localMemberMap.get(id) ?? id).join(', ');
+          }
+        } catch {}
+      }
+
+      return value;
+    };
+
+    const auditEvents =
+      auditResult.data?.map((row) => {
+        const fieldLabel = row.field === 'executionPeriods' ? 'Períodos de Execução' : row.field;
+        const oldVal = formatAuditValue(row.field, row.old_value);
+        const newVal = formatAuditValue(row.field, row.new_value);
+        return {
+          id: row.id,
+          taskId: row.task_id,
+          createdAt: row.created_at,
+          userId: row.changed_by,
+          type: 'audit' as const,
+          summary: `${fieldLabel}: ${oldVal} → ${newVal}`
+        };
+      }) ?? [];
+
+    const commentEvents =
+      commentResult.data?.map((row) => ({
+        id: row.id,
+        taskId: row.task_id,
+        createdAt: row.created_at,
+        userId: row.created_by,
+        type: 'comment' as const,
+        summary: row.content ?? ''
+      })) ?? [];
+
+    const extraEvents =
+      extraResult.data?.map((row) => ({
+        id: row.id,
+        taskId: '',
+        createdAt: row.created_at,
+        userId: row.created_by,
+        type: 'extra' as const,
+        summary: `Trabalho extra (${row.duration_minutes ?? 0}m): ${row.description ?? ''}`
+      })) ?? [];
+
+    const incoming = [...timeEvents, ...dueEvents, ...auditEvents, ...commentEvents, ...extraEvents];
+    if (!incoming.length) {
+      setDashboardEventsHasMore(false);
+      setDashboardEventsLoading(false);
+      return;
+    }
+
+    setDashboardEvents((prev) => {
+      const seen = new Set(prev.map((event) => `${event.type}-${event.id}`));
+      const merged = [...prev];
+      incoming.forEach((event) => {
+        const key = `${event.type}-${event.id}`;
+        if (!seen.has(key)) merged.push(event);
+      });
+      return merged.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    });
+
+    setDashboardEventsHasMore(
+      (timeResult.data?.length ?? 0) === FEED_EVENTS_PAGE_SIZE ||
+        (dueResult.data?.length ?? 0) === FEED_EVENTS_PAGE_SIZE ||
+        (auditResult.data?.length ?? 0) === FEED_EVENTS_PAGE_SIZE ||
+        (commentResult.data?.length ?? 0) === FEED_EVENTS_PAGE_SIZE ||
+        (extraResult.data?.length ?? 0) === FEED_EVENTS_PAGE_SIZE
+    );
+    setDashboardEventsLoading(false);
   };
 
 
@@ -1582,6 +1828,7 @@ export function SystemScreen({
       start_date: nextTask.startDate || null,
       due_date_original: nextTask.dueDateOriginal || null,
       due_date_current: nextTask.dueDateCurrent || nextTask.dueDateOriginal || null,
+      completion_date: nextTask.completionDate || null,
       execution_periods: nextTask.executionPeriods,
       estimated_minutes: nextTask.estimatedMinutes || 0,
       actual_minutes: nextTask.actualMinutes || 0,
@@ -1655,6 +1902,7 @@ export function SystemScreen({
         start_date: task.startDate || null,
         due_date_original: task.dueDateOriginal || null,
         due_date_current: task.dueDateCurrent || task.dueDateOriginal || null,
+        completion_date: task.completionDate || null,
         execution_periods: task.executionPeriods,
         estimated_minutes: task.estimatedMinutes || 0,
         actual_minutes: task.actualMinutes || 0,
@@ -1700,6 +1948,7 @@ export function SystemScreen({
     if (updates.startDate !== undefined) payload.start_date = updates.startDate || null;
     if (updates.dueDateOriginal !== undefined) payload.due_date_original = updates.dueDateOriginal || null;
     if (updates.dueDateCurrent !== undefined) payload.due_date_current = updates.dueDateCurrent || null;
+    if (updates.completionDate !== undefined) payload.completion_date = updates.completionDate || null;
     if (updates.executionPeriods !== undefined) payload.execution_periods = updates.executionPeriods;
     if (updates.estimatedMinutes !== undefined) payload.estimated_minutes = updates.estimatedMinutes;
     if (updates.actualMinutes !== undefined) payload.actual_minutes = updates.actualMinutes;
@@ -1725,6 +1974,7 @@ export function SystemScreen({
       startDate: 'Data de Inicio',
       dueDateOriginal: 'Prazo de Entrega',
       dueDateCurrent: 'Prazo de Entrega Atual',
+      completionDate: 'Data de Conclusão',
       estimatedMinutes: 'Tempo de Execução estimado',
       actualMinutes: 'Tempo de Execução efetivado',
       priority: 'Prioridade',
@@ -2593,6 +2843,8 @@ export function SystemScreen({
                   taskTypes={taskTypeOptions}
                   dashboardEvents={dashboardEvents}
                   dashboardFeedPosts={dashboardFeedPosts}
+                  feedLoading={feedLoading || dashboardEventsLoading}
+                  feedHasMore={feedHasMore || dashboardEventsHasMore}
                   dashboardLoading={dashboardLoading}
                   isManager={canManageWorkspaces}
                   canPostFeed={canPostInSelectedWorkspace}
@@ -2611,6 +2863,13 @@ export function SystemScreen({
                   onAddFeedPost={handleAddWorkspaceFeedPost}
                   onUpdateFeedPost={handleUpdateWorkspaceFeedPost}
                   onDeleteFeedPost={handleDeleteWorkspaceFeedPost}
+                  onLoadMoreFeed={() => {
+                    if (!selectedWorkspace?.id) return;
+                    Promise.all([
+                      loadWorkspaceFeedPosts(selectedWorkspace.id, { append: true }),
+                      loadMoreDashboardEvents()
+                    ]);
+                  }}
                   onNewProject={() => {
                     setProjectName('');
                     setProjectSummary('');

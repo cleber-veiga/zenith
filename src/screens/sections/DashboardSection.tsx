@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import ExcelJS from 'exceljs';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { FunctionsFetchError, FunctionsHttpError, FunctionsRelayError } from '@supabase/supabase-js';
 import type {
   ProjectTask,
@@ -70,6 +72,7 @@ type TaskGridFilters = {
   taskTypes: string[];
   priorities: TaskPriority[];
   statuses: TaskStatus[];
+  completionDate: string;
   dueDate: string;
   executors: string[];
   situations: TaskSituation[];
@@ -82,6 +85,7 @@ const DEFAULT_TASK_GRID_FILTERS: TaskGridFilters = {
   taskTypes: [],
   priorities: [],
   statuses: [],
+  completionDate: '',
   dueDate: '',
   executors: [],
   situations: []
@@ -294,6 +298,8 @@ type DashboardSectionProps = {
     summary: string;
   }>;
   dashboardFeedPosts: WorkspaceFeedPost[];
+  feedLoading: boolean;
+  feedHasMore: boolean;
   dashboardLoading: boolean;
   isManager: boolean;
   canPostFeed: boolean;
@@ -323,6 +329,7 @@ type DashboardSectionProps = {
   ) => Promise<void> | void;
   onUpdateFeedPost: (postId: string, content: string) => Promise<void> | void;
   onDeleteFeedPost: (postId: string) => Promise<void> | void;
+  onLoadMoreFeed: () => void;
   onNewProject: () => void;
 };
 
@@ -336,6 +343,8 @@ export function DashboardSection({
   taskTypes,
   dashboardEvents,
   dashboardFeedPosts,
+  feedLoading,
+  feedHasMore,
   dashboardLoading,
   isManager,
   canPostFeed,
@@ -354,6 +363,7 @@ export function DashboardSection({
   onAddFeedPost,
   onUpdateFeedPost,
   onDeleteFeedPost,
+  onLoadMoreFeed,
   onNewProject
 }: DashboardSectionProps) {
   const dashboardCaptureRef = useRef<HTMLDivElement>(null);
@@ -370,6 +380,7 @@ export function DashboardSection({
   const [summaryText, setSummaryText] = useState<string>('');
   const [summaryMessage, setSummaryMessage] = useState<string | null>(null);
   const [summaryGeneratedAt, setSummaryGeneratedAt] = useState<string | null>(null);
+  const [summaryDebug, setSummaryDebug] = useState<string>('');
   const [taskGridFilters, setTaskGridFilters] = useState<TaskGridFilters>(DEFAULT_TASK_GRID_FILTERS);
   const [taskViewMode, setTaskViewMode] = useState<TaskViewMode>('list');
   const [calendarView, setCalendarView] = useState<CalendarViewMode>('month');
@@ -377,6 +388,8 @@ export function DashboardSection({
   const [typeSectorFilter, setTypeSectorFilter] = useState<'all' | 'not_done'>('all');
   const [feedDraft, setFeedDraft] = useState('');
   const feedTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const feedSentinelRef = useRef<HTMLDivElement | null>(null);
+  const [feedDateFilter, setFeedDateFilter] = useState('');
   const [feedTaskMentions, setFeedTaskMentions] = useState<string[]>([]);
   const [feedMentionRange, setFeedMentionRange] = useState<{ start: number; end: number } | null>(
     null
@@ -389,7 +402,9 @@ export function DashboardSection({
     setSummaryGeneratedAt(null);
     setSummaryText('');
     setSummaryMessage(null);
+    setSummaryDebug('');
     setFeedDraft('');
+    setFeedDateFilter('');
     setFeedTaskMentions([]);
     setFeedMentionRange(null);
     setFeedMentionQuery('');
@@ -399,6 +414,25 @@ export function DashboardSection({
     setEditingPostId(null);
     setEditingPostDraft('');
   }, [selectedWorkspace?.id, projectFilterId]);
+
+  useEffect(() => {
+    if (!feedHasMore) return;
+    const sentinel = feedSentinelRef.current;
+    if (!sentinel) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry?.isIntersecting && !feedLoading) {
+          onLoadMoreFeed();
+        }
+      },
+      { root: null, rootMargin: '200px' }
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [feedHasMore, feedLoading, onLoadMoreFeed]);
 
   const statusOptions: TaskStatus[] = [
     'Backlog',
@@ -702,7 +736,7 @@ export function DashboardSection({
     }
   };
 
-  const feedItems = useMemo(() => {
+  const feedAllItems = useMemo(() => {
     const eventItems = dashboardEvents.map((event) => ({
       id: `event-${event.id}`,
       kind: 'event' as const,
@@ -727,6 +761,13 @@ export function DashboardSection({
       b.createdAt.localeCompare(a.createdAt)
     );
   }, [dashboardEvents, dashboardFeedPosts]);
+
+  const feedItems = useMemo(() => {
+    if (!feedDateFilter) return feedAllItems;
+    return feedAllItems.filter(
+      (item) => normalizeDateValue(item.createdAt) === feedDateFilter
+    );
+  }, [feedAllItems, feedDateFilter]);
 
   const sectorColorMap = useMemo(
     () => new Map(sectors.map((item) => [item.name, item.color])),
@@ -829,6 +870,7 @@ export function DashboardSection({
     return tasks
       .map((task) => {
         const dueDateValue = normalizeDateValue(task.dueDateCurrent || task.dueDateOriginal || '');
+        const completionDateValue = normalizeDateValue(task.completionDate || '');
         const situation = getTaskSituation(task);
         const executorLabel = task.executorIds
           .map((userId) => memberMap.get(userId) ?? userId)
@@ -842,7 +884,8 @@ export function DashboardSection({
           projectLabel,
           situation,
           executorLabel,
-          dueDateValue
+          dueDateValue,
+          completionDateValue
         };
       })
       .filter((row) => {
@@ -863,6 +906,12 @@ export function DashboardSection({
           return false;
         }
         if (taskGridFilters.statuses.length && !taskGridFilters.statuses.includes(row.task.status)) {
+          return false;
+        }
+        if (
+          taskGridFilters.completionDate &&
+          row.completionDateValue !== taskGridFilters.completionDate
+        ) {
           return false;
         }
         if (taskGridFilters.dueDate && row.dueDateValue !== taskGridFilters.dueDate) return false;
@@ -980,6 +1029,7 @@ export function DashboardSection({
       'tipo',
       'prioridade',
       'status',
+      'data_conclusao',
       'prazo',
       'executor',
       'situacao'
@@ -993,6 +1043,7 @@ export function DashboardSection({
         row.task.taskType || '',
         row.task.priority,
         row.task.status,
+        normalizeDateValue(row.task.completionDate || ''),
         normalizeDateValue(row.task.dueDateCurrent || row.task.dueDateOriginal || ''),
         row.executorLabel || '',
         row.situation
@@ -1006,6 +1057,7 @@ export function DashboardSection({
       { width: 22 },
       { width: 14 },
       { width: 18 },
+      { width: 14 },
       { width: 14 },
       { width: 34 },
       { width: 14 }
@@ -1080,6 +1132,7 @@ export function DashboardSection({
       const { data, error } = await supabase.functions.invoke('send-daily-dashboard-summary', {
         body: {
           generateOnly: true,
+          debug: true,
           workspaceId: selectedWorkspace.id,
           projectId: projectFilterId === 'all' ? null : projectFilterId,
           workspaceName: selectedWorkspace.name,
@@ -1118,12 +1171,22 @@ export function DashboardSection({
         throw new Error(detailedMessage);
       }
       if (data?.error) throw new Error(data.error);
+      if (data?.debug) {
+        setSummaryDebug(JSON.stringify(data.debug, null, 2));
+        console.log('Resumo IA debug:', data.debug);
+      } else {
+        setSummaryDebug('');
+      }
       if (typeof data?.summaryText === 'string') {
         setSummaryText(data.summaryText);
       }
       setSummaryGeneratedAt(now.toISOString());
 
-      setSummaryMessage('Resumo gerado com sucesso. Agora você pode baixar o PDF.');
+      if (data?.generatedWithAI === false) {
+        setSummaryMessage('Resumo gerado (modo debug/fallback). Verifique o conteúdo.');
+      } else {
+        setSummaryMessage('Resumo gerado com sucesso. Agora você pode baixar o PDF.');
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Falha ao gerar resumo diário.';
       setSummaryMessage(message);
@@ -1690,8 +1753,52 @@ export function DashboardSection({
                 <h3 className="text-sm font-semibold text-[var(--text-primary)]">
                   Resumo IA do dia
                 </h3>
-                <pre className="mt-3 whitespace-pre-wrap text-xs text-[var(--text-secondary)]">
-                  {summaryText}
+                <div className="mt-3 text-xs text-[var(--text-secondary)]">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      h1: ({ node, ...props }) => (
+                        <h1 className="mb-2 mt-4 text-lg font-bold text-[var(--text-primary)]" {...props} />
+                      ),
+                      h2: ({ node, ...props }) => (
+                        <h2 className="mb-2 mt-3 text-sm font-bold text-[var(--text-primary)]" {...props} />
+                      ),
+                      h3: ({ node, ...props }) => (
+                        <h3 className="mb-1 mt-2 text-xs font-bold text-[var(--text-primary)]" {...props} />
+                      ),
+                      p: ({ node, ...props }) => <p className="mb-2 leading-relaxed" {...props} />,
+                      ul: ({ node, ...props }) => <ul className="mb-2 list-disc pl-4" {...props} />,
+                      ol: ({ node, ...props }) => <ol className="mb-2 list-decimal pl-4" {...props} />,
+                      li: ({ node, ...props }) => <li className="mb-1" {...props} />,
+                      strong: ({ node, ...props }) => (
+                        <strong className="font-semibold text-[var(--text-primary)]" {...props} />
+                      ),
+                      a: ({ node, ...props }) => (
+                        <a
+                          className="text-cyan-400 hover:underline"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          {...props}
+                        />
+                      ),
+                      blockquote: ({ node, ...props }) => (
+                        <blockquote
+                          className="border-l-2 border-[var(--text-muted)] pl-2 italic text-[var(--text-muted)]"
+                          {...props}
+                        />
+                      ),
+                    }}
+                  >
+                    {summaryText}
+                  </ReactMarkdown>
+                </div>
+              </div>
+            )}
+            {summaryDebug && (
+              <div className="rounded-2xl border border-[var(--panel-border)] bg-[var(--panel-bg)] p-4">
+                <h3 className="text-xs font-semibold text-[var(--text-primary)]">Debug IA</h3>
+                <pre className="mt-2 whitespace-pre-wrap text-[10px] text-[var(--text-muted)]">
+                  {summaryDebug}
                 </pre>
               </div>
             )}
@@ -1709,8 +1816,14 @@ export function DashboardSection({
                   Pipeline de postagens e logs do time.
                 </p>
               </div>
-              <div className="text-xs text-[var(--text-muted)]">
-                {feedItems.length} interação(ões)
+              <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+                <input
+                  type="date"
+                  value={feedDateFilter}
+                  onChange={(event) => setFeedDateFilter(event.target.value)}
+                  className="rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 py-1 text-xs"
+                />
+                <span>{feedItems.length} interação(ões)</span>
               </div>
             </div>
 
@@ -2070,6 +2183,24 @@ export function DashboardSection({
                     </div>
                   );
                 })}
+                {feedHasMore && <div ref={feedSentinelRef} className="h-8" />}
+                {feedLoading && (
+                  <div className="pl-10 text-xs text-[var(--text-muted)]">Carregando mais...</div>
+                )}
+                {feedHasMore && !feedLoading && (
+                  <div className="pl-10">
+                    <button
+                      type="button"
+                      onClick={() => onLoadMoreFeed()}
+                      className="rounded-lg border border-[var(--panel-border)] bg-[var(--panel-bg)] px-4 py-2 text-xs font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-cyan-400/40"
+                    >
+                      Carregar mais
+                    </button>
+                  </div>
+                )}
+                {!feedHasMore && feedItems.length > 0 && (
+                  <div className="pl-10 text-xs text-[var(--text-muted)]">Fim do feed.</div>
+                )}
                 {!feedItems.length && (
                   <div className="pl-10 text-xs text-[var(--text-muted)]">
                     Sem interações registradas ainda.
@@ -2162,6 +2293,7 @@ export function DashboardSection({
                       <th className="px-3 py-2 font-semibold">Tipo</th>
                       <th className="px-3 py-2 font-semibold">Prioridade</th>
                       <th className="px-3 py-2 font-semibold">Status</th>
+                      <th className="px-3 py-2 font-semibold">Conclusão</th>
                       <th className="px-3 py-2 font-semibold">Prazo</th>
                       <th className="px-3 py-2 font-semibold">Executor</th>
                       <th className="px-3 py-2 font-semibold">Situação</th>
@@ -2252,6 +2384,19 @@ export function DashboardSection({
                             }))
                           }
                           placeholder="Status"
+                        />
+                      </th>
+                      <th className="px-2 py-2">
+                        <input
+                          type="date"
+                          value={taskGridFilters.completionDate}
+                          onChange={(event) =>
+                            setTaskGridFilters((prev) => ({
+                              ...prev,
+                              completionDate: event.target.value
+                            }))
+                          }
+                          className="w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 py-1.5 text-xs"
                         />
                       </th>
                       <th className="px-2 py-2">
@@ -2357,6 +2502,9 @@ export function DashboardSection({
                         </td>
                         <td className="px-3 py-3 text-[var(--text-secondary)]">{row.task.priority}</td>
                         <td className="px-3 py-3 text-[var(--text-secondary)]">{row.task.status}</td>
+                        <td className="px-3 py-3 text-[var(--text-secondary)]">
+                          {formatDatePtBr(row.task.completionDate)}
+                        </td>
                         <td className="px-3 py-3 text-[var(--text-secondary)]">
                           {formatDatePtBr(row.task.dueDateCurrent || row.task.dueDateOriginal)}
                         </td>
@@ -2785,7 +2933,7 @@ export function DashboardSection({
                         {detailTask.informIds.map((id) => memberMap.get(id) ?? id).join(', ') || '-'}
                       </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-3 gap-4">
                       <div className="space-y-2">
                         <label className="text-xs font-semibold text-[var(--text-secondary)]">Início</label>
                         <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
@@ -2796,6 +2944,12 @@ export function DashboardSection({
                         <label className="text-xs font-semibold text-[var(--text-secondary)]">Prazo de Entrega</label>
                         <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
                           {formatDatePtBr(detailTask.dueDateOriginal)}
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-[var(--text-secondary)]">Data de Conclusão</label>
+                        <div className="rounded-lg border border-[var(--input-border)] bg-[var(--muted-bg)] px-3 py-2 text-sm">
+                          {formatDatePtBr(detailTask.completionDate)}
                         </div>
                       </div>
                     </div>

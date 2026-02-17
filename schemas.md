@@ -66,6 +66,7 @@ create table if not exists public.project_tasks (
   start_date date,
   due_date_original date,
   due_date_current date,
+  completion_date date,
   estimated_minutes integer not null default 0,
   actual_minutes integer not null default 0,
   priority text default 'Média',

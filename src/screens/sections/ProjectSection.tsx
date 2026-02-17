@@ -156,6 +156,7 @@ const getEmptyTask = (description: string, status: TaskStatus): Omit<ProjectTask
   startDate: '',
   dueDateOriginal: '',
   dueDateCurrent: '',
+  completionDate: '',
   estimatedMinutes: 0,
   actualMinutes: 0,
   executionPeriods: [],
@@ -592,7 +593,7 @@ export function ProjectSection({
     .filter((group) => (!hasActiveFilters ? true : group.tasks.length > 0));
 
   const gridTemplate =
-    '100px minmax(260px, 1.4fr) minmax(180px, 1fr) minmax(160px, 1fr) minmax(120px, 0.7fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(160px, 1fr) minmax(180px, 1fr) minmax(200px, 1fr) minmax(160px, 0.9fr) minmax(160px, 0.9fr) 48px';
+    '100px minmax(260px, 1.4fr) minmax(180px, 1fr) minmax(160px, 1fr) minmax(120px, 0.7fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(160px, 1fr) minmax(180px, 1fr) minmax(180px, 1fr) minmax(200px, 1fr) minmax(160px, 0.9fr) minmax(160px, 0.9fr) 48px';
 
   const handleQuickAddTask = (status: TaskStatus) => {
     const description = newTaskNames[status]?.trim();
@@ -751,6 +752,7 @@ export function ProjectSection({
       'tipo',
       'prioridade',
       'status',
+      'data_conclusao',
       'prazo_entrega',
       'prazo_entrega_atual',
       'executor_email',
@@ -768,6 +770,7 @@ export function ProjectSection({
       taskTypes[0]?.name ?? '',
         'Média',
         'Pendente',
+        '',
         '2026-02-28',
         '',
         members.find((member) => member.email)?.email ?? '',
@@ -987,6 +990,7 @@ export function ProjectSection({
 
       const dueDateOriginal = get('prazo_entrega');
       const dueDateCurrent = get('prazo_entrega_atual') || dueDateOriginal;
+      const completionDate = get('data_conclusao');
 
       parsedTasks.push({
         name: description,
@@ -999,6 +1003,7 @@ export function ProjectSection({
         startDate: '',
         dueDateOriginal,
         dueDateCurrent,
+        completionDate,
         estimatedMinutes,
         actualMinutes: 0,
         executionPeriods: [],
@@ -1355,6 +1360,7 @@ export function ProjectSection({
                   <div>Validador</div>
                   <div>Informar</div>
                   <div>Status da Tarefa</div>
+                  <div>Data de Conclusão</div>
                   <div>Prazo de Entrega</div>
                   <div>Prazo de Entrega Atual</div>
                   <div>Tempo estimado</div>
@@ -1557,6 +1563,9 @@ export function ProjectSection({
                                     ) {
                                       updates.dueDateCurrent = task.dueDateOriginal;
                                     }
+                                    if (nextStatus === 'Concluída' && !task.completionDate) {
+                                      updates.completionDate = getTodayIsoDate();
+                                    }
                                     onUpdateTask(task.id, updates);
                                   }}
                                   options={statusOptions.map((s) => ({
@@ -1568,6 +1577,14 @@ export function ProjectSection({
                                       {opt?.label || task.status}
                                     </span>
                                   )}
+                                />
+                              </div>
+                              <div onDoubleClick={stopDoubleClick}>
+                                <SingleDatePicker
+                                  value={task.completionDate}
+                                  onChange={(val) => onUpdateTask(task.id, { completionDate: val })}
+                                  className="w-full"
+                                  inputClassName="w-full bg-transparent text-xs text-[var(--text-secondary)] outline-none placeholder:text-[var(--text-muted)]"
                                 />
                               </div>
                               <div onDoubleClick={stopDoubleClick}>
@@ -2238,6 +2255,9 @@ export function ProjectSection({
                       ) {
                         updates.dueDateCurrent = selectedTask.dueDateOriginal;
                       }
+                      if (nextStatus === 'Concluída' && !selectedTask.completionDate) {
+                        updates.completionDate = getTodayIsoDate();
+                      }
                       onUpdateTask(selectedTask.id, updates);
                     }}
                     options={statusOptions.map((s) => ({
@@ -2287,6 +2307,17 @@ export function ProjectSection({
                       onUpdateTask(selectedTask.id, {
                         dueDateOriginal: val,
                         dueDateCurrent: val
+                      })
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-[var(--text-secondary)]">Data de Conclusão</label>
+                  <SingleDatePicker
+                    value={selectedTask.completionDate}
+                    onChange={(val) =>
+                      onUpdateTask(selectedTask.id, {
+                        completionDate: val
                       })
                     }
                   />
